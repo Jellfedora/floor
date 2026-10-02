@@ -28,6 +28,21 @@ floor écoute sur `127.0.0.1:5002`. Mets un reverse proxy HTTPS devant (nginx, T
 
 Sauvegarde : `docker compose exec floor node -e "require('better-sqlite3')('/data/floor.db').backup('/data/backup.db')"`.
 
+## Production (Beemo)
+
+floor tourne sur la Beemo, à côté de Clara, et répond sur **https://fedoclara.hopto.org/floor/**. Le nginx de Clara lui passe `/floor/` (voir `nginx/floor.conf`, repris dans `nginx/clara.conf` du dépôt Clara).
+
+```bash
+# Première fois
+git clone https://github.com/Jellfedora/floor.git ~/floor
+cd ~/floor && docker compose up -d --build
+
+# Mise à jour
+cd ~/floor && git pull && docker compose up -d --build
+```
+
+Vérifier : `curl https://fedoclara.hopto.org/floor/health` doit répondre `{"ok":true}`.
+
 ## API
 
 Toutes les réponses sont en JSON. Les erreurs ont la forme `{ "error": "message" }`.
