@@ -30,7 +30,7 @@ Sauvegarde : `docker compose exec floor node -e "require('better-sqlite3')('/dat
 
 ## Production (Beemo)
 
-floor tourne sur la Beemo, à côté de Clara, et répond sur **https://fedoclara.hopto.org/floor/**. Le nginx de Clara lui passe `/floor/` (voir `nginx/floor.conf`, repris dans `nginx/clara.conf` du dépôt Clara).
+floor tourne sur la Beemo et répond sur **https://fedoheim.hopto.org/floor/**. Le nginx de fedoheim lui passe `/floor/` (voir `nginx/floor.conf`, repris dans `/etc/nginx/sites-available/fedoheim.conf`).
 
 ```bash
 # Première fois
@@ -41,7 +41,7 @@ cd ~/floor && docker compose up -d --build
 cd ~/floor && git pull && docker compose up -d --build
 ```
 
-Vérifier : `curl https://fedoclara.hopto.org/floor/health` doit répondre `{"ok":true}`.
+Vérifier : `curl https://fedoheim.hopto.org/floor/health` doit répondre `{"ok":true}`.
 
 ## API
 
