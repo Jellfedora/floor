@@ -1,0 +1,15 @@
+services:
+  floor:
+    build: .
+    container_name: floor
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5002:5002"
+    environment:
+      # Derrière le reverse proxy : le nombre de proxys devant floor (l'adresse du joueur en dépend).
+      TRUST_PROXY: "1"
+    volumes:
+      - floor-data:/data
+
+volumes:
+  floor-data:
