@@ -2,12 +2,15 @@ const express = require('express')
 const { players: makePlayers, HttpError } = require('./players')
 const { rateLimit } = require('./ratelimit')
 const games = require('./games')
+const { live } = require('./live')
 
 const BOARD_MAX = 100
 
-function createApp (db, { trustProxy = false } = {}) {
+function createApp (db, { trustProxy = false, now } = {}) {
   const players = makePlayers(db)
   const app = express()
+  // Pour Ronnie.io, qui s'ouvre sur le serveur HTTP (voir src/blob).
+  app.locals.players = players
   app.set('trust proxy', trustProxy)
   app.disable('x-powered-by')
   app.use(express.json({ limit: '16kb' }))
@@ -18,9 +21,16 @@ function createApp (db, { trustProxy = false } = {}) {
   app.post('/v1/players', rateLimit(20, 60 * 60 * 1000), (req, res) => {
     res.status(201).json(players.create(req.body?.name))
   })
+  // Un pseudo est-il libre ? (pendant qu'on le tape)
+  app.get('/v1/players/available', rateLimit(1200, 60 * 60 * 1000), players.auth(false), (req, res) => {
+    res.json(players.available(String(req.query.name ?? ''), req.player?.id))
+  })
   app.patch('/v1/players/me', players.auth(true), (req, res) => {
     res.json(players.rename(req.player.id, req.body?.name))
   })
+
+  // Le jeu à deux : présence, invitations, parties.
+  app.use('/v1/live', live(db, players, { now }))
 
   // Jeux.
   app.get('/v1/games', (req, res) => {

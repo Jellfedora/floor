@@ -61,3 +61,21 @@ test('refuse les scores impossibles, les joueurs inconnus et les jeux inconnus',
   assert.equal((await call('POST', '/v1/games/tetris/scores', { token: a.token, body: round(100) })).status, 404)
   assert.equal((await call('POST', '/v1/players', { body: { name: 'x'.repeat(25) } })).status, 400)
 })
+
+test('un pseudo n’appartient qu’à un joueur', async () => {
+  const a = (await call('POST', '/v1/players', { body: { name: 'Lemmy' } })).body
+  assert.equal((await call('POST', '/v1/players', { body: { name: '  lemmy ' } })).status, 409)
+  const b = (await call('POST', '/v1/players', { body: { name: 'Motörhead' } })).body
+  assert.equal((await call('PATCH', '/v1/players/me', { token: b.token, body: { name: 'LEMMY' } })).status, 409)
+  assert.equal((await call('PATCH', '/v1/players/me', { token: b.token, body: { name: 'MOTÖRHEAD' } })).status, 200)
+  // Le sien, autrement écrit : gardé.
+  assert.equal((await call('PATCH', '/v1/players/me', { token: a.token, body: { name: 'LEMMY' } })).body.name, 'LEMMY')
+  // Libre ou pris, vu pendant qu'on le tape (le sien est libre pour soi).
+  assert.deepEqual((await call('GET', '/v1/players/available?name=%20lemmy')).body, { name: 'lemmy', free: false })
+  assert.equal((await call('GET', '/v1/players/available?name=LEMMY', { token: a.token })).body.free, true)
+  assert.equal((await call('GET', '/v1/players/available?name=Phil')).body.free, true)
+  assert.equal((await call('GET', '/v1/players/available?name=' + 'x'.repeat(25))).status, 400)
+  // Libéré, il se reprend.
+  await call('PATCH', '/v1/players/me', { token: a.token, body: { name: 'Ian' } })
+  assert.equal((await call('POST', '/v1/players', { body: { name: 'Lemmy' } })).status, 201)
+})

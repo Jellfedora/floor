@@ -3,7 +3,9 @@
 //   order : 'desc' quand le plus grand gagne, 'asc' quand c'est le plus petit (un temps...).
 // Un nouveau jeu = un fichier ici, ajouté à la liste.
 const games = [
-  require('./speed-metal')
+  require('./speed-metal'),
+  require('./puissance-4'),
+  require('./ronnie-io')
 ]
 
 module.exports = Object.fromEntries(games.map((g) => [g.id, g]))

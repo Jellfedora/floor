@@ -49,12 +49,13 @@ Toutes les réponses sont en JSON. Les erreurs ont la forme `{ "error": "message
 
 ### Joueurs
 
-Un joueur n'a pas de compte. Ronnie crée le sien au premier score envoyé et garde son jeton. La base ne garde que l'empreinte du jeton.
+Un joueur n'a pas de compte, seulement un jeton. Ronnie crée le sien quand le joueur choisit son pseudo, et garde le jeton. La base ne garde que l'empreinte du jeton.
 
 - `POST /v1/players` `{ "name": "Ronnie" }` → `201 { id, name, token }` (20 par heure et par adresse)
 - `PATCH /v1/players/me` `{ "name": "Dio" }` (jeton) → `{ id, name }`
+- `GET /v1/players/available?name=Dio` (jeton facultatif) → `{ name, free }` : le pseudo nettoyé, et s'il est libre. Avec le jeton, son propre pseudo compte comme libre.
 
-Le nom fait 24 caractères au plus. Un nom vide donne `null` : le jeu affiche alors « Anonyme ».
+Le pseudo fait 24 caractères au plus. Il est **unique** sans tenir compte des majuscules : un pseudo déjà pris par un autre joueur donne `409 { "error": "Pseudo déjà pris" }`. Un nom vide donne `null` (les anciens joueurs sans pseudo) : le jeu affiche alors « Anonyme ».
 
 Le jeton se passe dans l'en-tête `Authorization: Bearer <token>`.
 
@@ -71,6 +72,46 @@ Le jeton se passe dans l'en-tête `Authorization: Bearer <token>`.
 #### `speed-metal`
 
 Le jeu de frappe de la page d'accueil de Ronnie. Le corps de la requête : `{ letters, words, wpm, accuracy, combo }`, tous des entiers. Le score correspond à `letters`.
+
+#### `puissance-4`
+
+Les victoires en ligne : floor les compte lui-même à la fin des parties à deux (`POST …/scores` répond `403`).
+
+#### `ronnie-io`
+
+La plus grosse masse de chaque joueur sur Ronnie.io : floor l'enregistre lui-même (`POST …/scores` répond `403`).
+
+### Parties à deux (`/v1/live`)
+
+Toutes ces routes demandent le jeton d'un joueur **avec un pseudo** (`403` sinon). Tout vit en mémoire : un redémarrage de floor oublie les invitations et les parties en cours (pas les victoires).
+
+Un joueur est **en ligne** tant que Ronnie se signale (toutes les 5 s, chaque seconde pendant une partie) : chaque requête compte, et après 25 s sans nouvelles il ne l'est plus.
+
+- `POST /v1/live/ping` → `{ online: [{ name, busy }], invites: [{ id, from, at }], sent: { id, to, status, match } | null, match }`
+  - `online` : les autres joueurs en ligne, `busy` s'ils sont en partie.
+  - `invites` : les invitations reçues, pas encore répondues.
+  - `sent` : la dernière invitation envoyée. `status` vaut `pending`, `accepted` (avec `match`), `declined`, `expired` (60 s sans réponse) ou `cancelled`.
+  - `match` : la partie en cours du joueur.
+- `POST /v1/live/invites` `{ "to": "Dio", "game": "puissance-4" }` → `201 { id }`. `game` : `puissance-4` (par défaut) ou `ronnie-io`. `404` si le joueur n'est pas en ligne, `409` si l'un des deux est en partie (Puissance 4). Les invitations reçues et envoyées portent leur `game`.
+- `POST /v1/live/invites/:id/accept` → `201`, la partie (celui qui a invité commence) ; pour Ronnie.io, `{ game: 'ronnie-io' }` : chacun rejoint le monde.
+- `POST /v1/live/invites/:id/decline`, `DELETE /v1/live/invites/:id` (annuler la sienne).
+- `GET /v1/live/matches/:id` → la partie vue par le joueur :
+  `{ id, players: [nom1, nom2], you, columns, turn, moves, last, over, winner, reason, line, rematch: { you, them }, next }`
+  - `columns` : 7 piles, du bas vers le haut (`1` ou `2`). `you`, `turn` et `winner` valent 1 ou 2 ; `winner` vaut 3 pour un nul.
+  - `reason` : `line`, `draw` ou `forfeit`. `line` : les 4 cases alignées `[colonne, ligne]`.
+- `POST /v1/live/matches/:id/moves` `{ "column": 3 }` → la partie. `409` si ce n'est pas son tour ou si la colonne est pleine.
+- `POST /v1/live/matches/:id/leave` : abandon, l'autre gagne. Sans nouvelles d'un joueur pendant 45 s, la partie est aussi perdue par forfait.
+- `POST /v1/live/matches/:id/rematch` : une revanche, créée quand les deux l'ont demandée (`next`) ; l'autre joueur commence.
+
+### Ronnie.io (WebSocket `/v1/blob/ws`)
+
+Un jeu comme agar.io : floor fait tourner le monde (`src/blob/world.js`, 40 pas par seconde) et l'envoie aux joueurs 20 fois par seconde (`src/blob/index.js`). Des bots le peuplent jusqu'à 14 joueurs ; des bonus (vitesse, aimant, bouclier), une pluie de granules dorées, un boss, et Ronnie, rose et rare : qui le mange gagne son skin (table `badges`). Les autres skins se débloquent avec la plus grosse masse. Le monde ne tourne que si quelqu'un est connecté, et repart de zéro quand le dernier s'en va.
+
+- Le premier message : `{ t: 'hello', token, aspect }` (un joueur avec un pseudo). Ensuite `join { skin }`, `aim { x, y }`, `split`, `eject`, `leave`, `ping { n }`.
+- floor envoie `welcome { size, skins }`, les images `s` (seulement les granules qui changent), `board` chaque seconde, `records`, `dead`, `kill`, `event`, `bonus`, `badge`, `pong`.
+- Connexion tombée en pleine vie : les cellules attendent 10 s, le joueur les reprend en se reconnectant.
+- Par adresse : 4 connexions ouvertes et 30 ouvertures par minute au plus.
+- Derrière nginx, le WebSocket a besoin de son bloc (voir `nginx/floor.conf`).
 
 ## Ajouter un jeu
 
