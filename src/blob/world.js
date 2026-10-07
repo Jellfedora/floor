@@ -33,8 +33,8 @@ const BONUSES = 6
 const BONUS = { speed: 0, magnet: 1, shield: 2 }
 const BONUS_TIME = [6, 8, 4]
 const BONUS_BACK = 12
-// Les effets, en bits (les autres joueurs les voient).
-const FX = { speed: 1, magnet: 2, shield: 4 }
+// Les effets, en bits (les autres joueurs les voient) ; `paused` : le joueur a mis sa partie en pause.
+const FX = { speed: 1, magnet: 2, shield: 4, paused: 8 }
 
 // Les événements : le premier après tant, puis entre deux.
 const EVENT_FIRST = [60, 120]
@@ -88,7 +88,7 @@ function center (p) {
 const viewHeight = (m) => 900 + Math.sqrt(m) * 45
 
 // Les effets d'un joueur, en bits.
-const fxBits = (p) => (p.fx.speed > 0 ? FX.speed : 0) | (p.fx.magnet > 0 ? FX.magnet : 0) | (p.fx.shield > 0 ? FX.shield : 0)
+const fxBits = (p) => (p.fx.speed > 0 ? FX.speed : 0) | (p.fx.magnet > 0 ? FX.magnet : 0) | (p.fx.shield > 0 ? FX.shield : 0) | (p.paused ? FX.paused : 0)
 
 class World {
   // `bots` : false pour un monde sans bots, bonus ni événements (les tests des règles).
@@ -170,7 +170,10 @@ class World {
       kills: 0,
       born: this.time,
       think: 0,
-      fx: { speed: 0, magnet: 0, shield: 0 }
+      fx: { speed: 0, magnet: 0, shield: 0 },
+      // En pause depuis (Date.now()), sinon null : ses cellules ne bougent plus, ne mangent rien et
+      // ne se font pas manger ; les bots l'ignorent.
+      paused: null
     }
     this.players.set(p.id, p)
     this.spawn(p, startMass)
@@ -194,6 +197,15 @@ class World {
   aim (id, x, y) {
     const p = this.players.get(id)
     if (p && Number.isFinite(x) && Number.isFinite(y)) p.target = { x: Math.min(Math.max(x, -500), SIZE + 500), y: Math.min(Math.max(y, -500), SIZE + 500) }
+  }
+
+  // La pause (`at` : depuis quand), ou la reprise (null) : les cellules repartent de là où elles sont.
+  pause (id, at) {
+    const p = this.players.get(id)
+    if (!p || !p.cells.length) return
+    p.paused = at
+    this.stop(id)
+    for (const c of p.cells) c.bx = c.by = 0
   }
 
   // Le joueur ne bouge plus (sa connexion est tombée) : ses cellules s'arrêtent où elles sont.
@@ -246,6 +258,8 @@ class World {
     const deaths = []
     const fade = Math.exp(-BOOST_FADE * dt)
     for (const p of this.players.values()) {
+      // En pause : tout s'arrête pour lui, ses bonus compris.
+      if (p.paused) continue
       for (const k of Object.keys(p.fx)) p.fx[k] = Math.max(0, p.fx[k] - dt)
       if (p.bot && p.cells.length) {
         p.think -= dt
@@ -351,6 +365,7 @@ class World {
   eatPellets () {
     let gone = false
     for (const p of this.players.values()) {
+      if (p.paused) continue
       const pull = p.fx.magnet > 0
       for (const c of p.cells) {
         const body = radius(c.m)
@@ -386,7 +401,7 @@ class World {
         continue
       }
       for (const p of this.players.values()) {
-        if (!p.cells.some((c) => Math.hypot(c.x - b.x, c.y - b.y) < radius(c.m) + 14)) continue
+        if (p.paused || !p.cells.some((c) => Math.hypot(c.x - b.x, c.y - b.y) < radius(c.m) + 14)) continue
         const kind = Object.keys(BONUS)[b.kind]
         p.fx[kind] = BONUS_TIME[b.kind]
         b.back = this.time + BONUS_BACK
@@ -401,6 +416,7 @@ class World {
     for (const v of this.viruses) {
       const rv = radius(v.m)
       for (const p of this.players.values()) {
+        if (p.paused) continue
         const c = p.cells.find((c) => c.m >= v.m * EAT_RATIO && Math.hypot(c.x - v.x, c.y - v.y) < radius(c.m) - rv * 0.4)
         if (!c) continue
         c.m += v.m
@@ -433,13 +449,13 @@ class World {
     all.sort((a, b) => b.c.m - a.c.m)
     for (let i = 0; i < all.length; i++) {
       const big = all[i]
-      if (big.c.m <= 0) continue
+      if (big.c.m <= 0 || big.p.paused) continue
       const rb = radius(big.c.m)
       for (let j = i + 1; j < all.length; j++) {
         const small = all[j]
         if (small.p === big.p || small.c.m <= 0 || big.c.m < small.c.m * EAT_RATIO) continue
-        // Le bouclier : on ne le mange pas.
-        if (small.p.fx.shield > 0) continue
+        // Le bouclier, la pause : on ne le mange pas.
+        if (small.p.fx.shield > 0 || small.p.paused) continue
         if (Math.hypot(small.c.x - big.c.x, small.c.y - big.c.y) >= rb - radius(small.c.m) * 0.4) continue
         big.c.m += small.c.m
         small.c.m = 0
@@ -555,7 +571,7 @@ class World {
     let fleeX = 0; let fleeY = 0
     let prey = null; let preyScore = 0
     for (const o of this.players.values()) {
-      if (o === p) continue
+      if (o === p || o.paused) continue
       for (const c of o.cells) {
         const d = Math.hypot(c.x - at.x, c.y - at.y)
         if (d > reach) continue

@@ -12,6 +12,8 @@ const MESSAGES_MAX = 80
 const BUFFER_MAX = 256 * 1024
 // Sa connexion tombée, les cellules d'un joueur l'attendent tant (il revient s'il se reconnecte).
 const GRACE_MS = 10 * 1000
+// Une partie en pause attend tant, connecté ou non ; ensuite le joueur sort (sa masse compte).
+const PAUSE_MS = 30 * 60 * 1000
 // Par adresse : connexions ouvertes en même temps, et ouvertes par minute.
 const PER_IP = 4
 const PER_IP_MINUTE = 30
@@ -20,18 +22,19 @@ const PER_IP_MINUTE = 30
 //
 // Le premier message donne le jeton ({ t: 'hello', token, aspect }) : seulement avec un pseudo.
 // Ensuite { t: 'join', skin } pour entrer, { t: 'aim', x, y } (la souris, dans le monde),
-// { t: 'split' }, { t: 'eject' }, { t: 'leave' } (pour regarder), { t: 'ping', n } (floor répond
-// { t: 'pong', n }, pour mesurer le délai).
+// { t: 'split' }, { t: 'eject' }, { t: 'leave' } (pour regarder), { t: 'pause' } puis { t: 'resume' }
+// (la bulle attend, protégée, au plus PAUSE_MS : le joueur peut fermer la connexion et revenir),
+// { t: 'ping', n } (floor répond { t: 'pong', n }, pour mesurer le délai).
 //
 // floor envoie { t: 'welcome', size, skins }, puis 20 fois par seconde ce que le joueur voit
 // ({ t: 's' }, voir `frame`), le classement chaque seconde ({ t: 'board' }), le classement des
 // records ({ t: 'records' }) à l'arrivée et à chaque nouveau record, { t: 'dead' } quand il s'est
-// fait manger, et au fil de la partie : les morts ({ t: 'kill' }), les événements ({ t: 'event' }),
+// fait manger (expired : sa pause a trop duré), et au fil de la partie : les morts ({ t: 'kill' }), les événements ({ t: 'event' }),
 // ses bonus ({ t: 'bonus' }), son badge Ronnie ({ t: 'badge' }).
 //
 // Tout vit en mémoire ; la plus grosse masse de chaque joueur va au classement `ronnie-io`. Quand
 // le dernier joueur s'en va, le monde s'arrête et repart de zéro avec le suivant.
-function blob (server, db, players, { random, trustProxy = false, graceMs = GRACE_MS, perIp = PER_IP, perIpMinute = PER_IP_MINUTE } = {}) {
+function blob (server, db, players, { random, trustProxy = false, graceMs = GRACE_MS, pauseMs = PAUSE_MS, perIp = PER_IP, perIpMinute = PER_IP_MINUTE } = {}) {
   // Un monde neuf à chaque fois que quelqu'un arrive dans un monde vide (voir `idle`).
   let world = new World({ random })
   const wss = new WebSocketServer({ server, path: '/v1/blob/ws', maxPayload: 4096 })
@@ -104,7 +107,9 @@ function blob (server, db, players, { random, trustProxy = false, graceMs = GRAC
     const t = Date.now()
     const dt = Math.min((t - last) / 1000, 0.1)
     last = t
-    for (const death of world.step(dt)) {
+    // Personne de connecté (que des joueurs attendus) : le monde ne bouge pas en attendant.
+    const deaths = clients.size ? world.step(dt) : []
+    for (const death of deaths) {
       const p = death.player
       if (p.bot) continue
       const client = clientOf(p.id)
@@ -117,13 +122,22 @@ function blob (server, db, players, { random, trustProxy = false, graceMs = GRAC
       world.leave(p.id)
     }
     for (const news of world.drain()) announce(news)
-    // Les orphelins qui ne sont pas revenus.
+    // Les orphelins qui ne sont pas revenus (en pause : au bout de la pause).
     for (const [account, o] of orphans) {
-      if (t - o.at < graceMs) continue
       const p = world.players.get(o.id)
+      if (p?.paused ? t - p.paused < pauseMs : t - o.at < graceMs) continue
       if (p?.cells.length) record(account, p.best, p.kills, world.time - p.born)
       world.leave(o.id)
       orphans.delete(account)
+    }
+    // Connectés mais en pause depuis trop longtemps : sortis.
+    for (const client of ready()) {
+      const p = client.id && world.players.get(client.id)
+      if (!p?.paused || t - p.paused < pauseMs) continue
+      const isRecord = record(client.account.id, p.best, p.kills, world.time - p.born)
+      send(client, { t: 'dead', by: '', best: Math.round(p.best), kills: p.kills, time: Math.round(world.time - p.born), record: isRecord, expired: true })
+      world.leave(p.id)
+      client.id = null
     }
     if (idle()) return
     ticks++
@@ -280,10 +294,16 @@ function blob (server, db, players, { random, trustProxy = false, graceMs = GRAC
           aspect(client, msg.aspect)
           break
         case 'split':
-          if (client.id) world.split(client.id)
+          if (client.id && !world.players.get(client.id)?.paused) world.split(client.id)
           break
         case 'eject':
-          if (client.id) world.eject(client.id)
+          if (client.id && !world.players.get(client.id)?.paused) world.eject(client.id)
+          break
+        case 'pause':
+          if (client.id && !world.players.get(client.id)?.paused) world.pause(client.id, Date.now())
+          break
+        case 'resume':
+          if (client.id) world.pause(client.id, null)
           break
         case 'leave':
           out(client)
@@ -330,7 +350,7 @@ function blob (server, db, players, { random, trustProxy = false, graceMs = GRAC
     aspect(client, msg.aspect)
     send(client, { t: 'welcome', size: SIZE, skins: skins(account.id) })
     send(client, records(client))
-    if (client.id) send(client, { t: 'joined', id: client.id, resumed: true })
+    if (client.id) send(client, { t: 'joined', id: client.id, resumed: true, paused: !!world.players.get(client.id)?.paused })
   }
 
   function refuse (client, error) {

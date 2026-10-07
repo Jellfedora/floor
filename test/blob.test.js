@@ -42,6 +42,37 @@ test('les règles : manger, se diviser, fusionner, éclater sur un virus', { tim
   assert.ok(world.viruses[0].x !== big.cells[0].x)
 })
 
+test('la pause : ni bouger, ni manger, ni se faire manger, et les bots l’ignorent', { timeout: 15000 }, () => {
+  const world = new World({ random: seeded(3), bots: false })
+  const me = world.join('Dio')
+  const big = world.join('Ozzy')
+  world.viruses = []
+  Object.assign(me.cells[0], { x: 1000, y: 1000, m: 50 })
+  world.pause(me.id, Date.now())
+  world.aim(me.id, 3000, 3000)
+  // Un plus gros posé dessus, une granule dessous : rien ne se passe.
+  Object.assign(big.cells[0], { x: 1005, y: 1000, m: 2000 })
+  world.pellets = [{ id: 1, x: 1000, y: 1000, hue: 0, m: 1, vx: 0, vy: 0, ejected: false, gold: false }]
+  world.step(1 / 40)
+  assert.equal(me.cells.length, 1)
+  assert.deepEqual([me.cells[0].x, me.cells[0].y, me.cells[0].m], [1000, 1000, 50])
+  assert.equal(world.pellets.length, 1)
+  assert.ok(world.drain().every((n) => n.t !== 'kill'))
+  // Reprise : il repart d'où il était (pas vers où visait la souris pendant la pause)... et se fait manger.
+  world.pause(me.id, null)
+  world.step(1 / 40)
+  assert.equal(me.cells.length, 0)
+
+  // Les bots ne le chassent pas.
+  const bot = world.join('Lemmy', { bot: true })
+  const prey = world.join('Rob')
+  Object.assign(bot.cells[0], { x: 2000, y: 2000, m: 300 })
+  Object.assign(prey.cells[0], { x: 2200, y: 2000, m: 20 })
+  world.pause(prey.id, Date.now())
+  world.thinkBot(bot)
+  assert.notDeepEqual(bot.target, { x: 2200, y: 2000 })
+})
+
 test('les bonus : vitesse, aimant, bouclier', { timeout: 15000 }, () => {
   const world = new World({ random: seeded(3), bots: false })
   const dio = world.join('Dio')
@@ -118,7 +149,7 @@ before(async () => {
   db = open(':memory:')
   app = createApp(db)
   server = app.listen(0)
-  game = blob(server, db, app.locals.players, { graceMs: 1500 })
+  game = blob(server, db, app.locals.players, { graceMs: 1500, pauseMs: 3000 })
   await new Promise((resolve) => server.once('listening', resolve))
   url = `127.0.0.1:${server.address().port}`
 })
@@ -233,12 +264,42 @@ test('la connexion tombée : ses cellules l’attendent, il les reprend', { time
   const b = await connect()
   b.say({ t: 'hello', token })
   const back = await b.next('joined')
-  assert.deepEqual(back, { t: 'joined', id, resumed: true })
+  assert.deepEqual(back, { t: 'joined', id, resumed: true, paused: false })
   // Partie pour de bon : après le délai, ses cellules s'en vont.
   b.ws.terminate()
   await b.closed
   await pause(2000)
   assert.equal(game.world.players.get(id), undefined)
+})
+
+test('la pause : il ferme, revient, reprend ; trop longue, il sort', { timeout: 15000 }, async () => {
+  const token = await account('Ronnie')
+  const a = await connect()
+  a.say({ t: 'hello', token })
+  await a.next('welcome')
+  a.say({ t: 'join' })
+  const { id } = await a.next('joined')
+  a.say({ t: 'pause' })
+  await pause(100)
+  a.ws.close()
+  await a.closed
+  // Plus longtemps que la grâce d'une connexion tombée : toujours là, en pause.
+  await pause(1800)
+  assert.ok(game.world.players.get(id)?.paused, 'en pause')
+  const b = await connect()
+  b.say({ t: 'hello', token })
+  assert.deepEqual(await b.next('joined'), { t: 'joined', id, resumed: true, paused: true })
+  b.say({ t: 'resume' })
+  await pause(100)
+  assert.equal(game.world.players.get(id).paused, null)
+  // En pause trop longtemps, même connecté : sorti, sa masse au classement.
+  game.world.players.get(id).fx.shield = 60
+  b.say({ t: 'pause' })
+  const dead = await b.next('dead')
+  assert.equal(dead.expired, true)
+  assert.equal(game.world.players.get(id), undefined)
+  b.ws.close()
+  await b.closed
 })
 
 test('le dernier parti, le monde repart de zéro', { timeout: 15000 }, async () => {
