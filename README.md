@@ -37,8 +37,22 @@ floor tourne sur la Beemo et répond sur **https://fedoheim.hopto.org/floor/**. 
 git clone https://github.com/Jellfedora/floor.git ~/floor
 cd ~/floor && docker compose up -d --build
 
-# Mise à jour
+# Mise à jour à la main (d'habitude inutile, voir plus bas)
 cd ~/floor && git pull && docker compose up -d --build
+```
+
+**Déploiement automatique** : un push sur `main` est en ligne dans les 5 minutes. Sur la Beemo, cron lance
+`scripts/auto-deploy.sh`, qui récupère `main` (clé de déploiement GitHub en lecture seule,
+`~/.ssh/floor_deploy`), et reconstruit floor s'il a changé. Son journal : `~/floor-deploy.log`.
+
+```bash
+# Mise en place (une fois) : la clé, à ajouter au dépôt (gh repo deploy-key add, lecture seule)
+ssh-keygen -t ed25519 -N "" -C floor-deploy -f ~/.ssh/floor_deploy
+# ~/floor devient un clone qui passe par cette clé, et cron le surveille
+cd ~/floor && git init -q && git remote add origin git@github.com:Jellfedora/floor.git
+git config core.sshCommand "ssh -i ~/.ssh/floor_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+git fetch -q origin main && git reset -q --hard origin/main && git branch -q -M main && git branch -q -u origin/main
+(crontab -l 2>/dev/null; echo '*/5 * * * * $HOME/floor/scripts/auto-deploy.sh >> $HOME/floor-deploy.log 2>&1') | crontab -
 ```
 
 Vérifier : `curl https://fedoheim.hopto.org/floor/health` doit répondre `{"ok":true}`.
