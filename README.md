@@ -110,19 +110,21 @@ Un joueur est **en ligne** tant que Ronnie se signale (toutes les 5 s, chaque se
 - `POST /v1/live/invites/:id/accept` → `201`, la partie (celui qui a invité commence) ; pour Ronnie.io, `{ game: 'ronnie-io' }` : chacun rejoint le monde.
 - `POST /v1/live/invites/:id/decline`, `DELETE /v1/live/invites/:id` (annuler la sienne).
 - `GET /v1/live/matches/:id` → la partie vue par le joueur :
-  `{ id, players: [nom1, nom2], you, columns, turn, moves, last, over, winner, reason, line, rematch: { you, them }, next }`
+  `{ id, players: [nom1, nom2], you, columns, turn, moves, last, over, winner, reason, line, rematch: { you, them }, next, chat }`
   - `columns` : 7 piles, du bas vers le haut (`1` ou `2`). `you`, `turn` et `winner` valent 1 ou 2 ; `winner` vaut 3 pour un nul.
   - `reason` : `line`, `draw` ou `forfeit`. `line` : les 4 cases alignées `[colonne, ligne]`.
+  - `chat` : `[nom, texte, le sien]...`, les 50 derniers messages des deux joueurs (ils suivent dans la revanche).
 - `POST /v1/live/matches/:id/moves` `{ "column": 3 }` → la partie. `409` si ce n'est pas son tour ou si la colonne est pleine.
 - `POST /v1/live/matches/:id/leave` : abandon, l'autre gagne. Sans nouvelles d'un joueur pendant 45 s, la partie est aussi perdue par forfait.
 - `POST /v1/live/matches/:id/rematch` : une revanche, créée quand les deux l'ont demandée (`next`) ; l'autre joueur commence.
+- `POST /v1/live/matches/:id/chat` `{ "text": "bien joué" }` → la partie. Une ligne de 200 caractères au plus ; `400` si le message est vide.
 
 ### Ronnie.io (WebSocket `/v1/blob/ws`)
 
-Un jeu comme agar.io : floor fait tourner le monde (`src/blob/world.js`, 40 pas par seconde) et l'envoie aux joueurs 20 fois par seconde (`src/blob/index.js`). Des bots le peuplent jusqu'à 14 joueurs ; des bonus (vitesse, aimant, bouclier), une pluie de granules dorées, un boss, et Ronnie, rose et rare : qui le mange gagne son skin (table `badges`). Les autres skins se débloquent avec la plus grosse masse. Le monde ne tourne que si quelqu'un est connecté, et repart de zéro quand le dernier s'en va.
+Un jeu comme agar.io : floor fait tourner le monde (`src/blob/world.js`, 40 pas par seconde) et l'envoie aux joueurs 20 fois par seconde (`src/blob/index.js`). Des bots le peuplent jusqu'à 14 joueurs, chacun avec son caractère (fermier, chasseur, opportuniste, campeur), et peuvent grossir un peu plus que le plus gros joueur ; un joueur premier depuis une minute a sa tête mise à prix. Des bonus (vitesse, aimant, bouclier, fantôme, mine), des événements tour à tour (pluie de granules dorées, boss, zone qui se resserre, trou noir), et Ronnie, rose et rare : qui le mange gagne son skin (table `badges`). Les autres skins se débloquent avec la plus grosse masse. Le monde ne tourne que si quelqu'un est connecté, et repart de zéro quand le dernier s'en va.
 
-- Le premier message : `{ t: 'hello', token, aspect }` (un joueur avec un pseudo). Ensuite `join { skin }`, `aim { x, y }`, `split`, `eject`, `leave`, `ping { n }`.
-- floor envoie `welcome { size, skins }`, les images `s` (seulement les granules qui changent), `board` chaque seconde, `records`, `dead`, `kill`, `event`, `bonus`, `badge`, `pong`.
+- Le premier message : `{ t: 'hello', token, aspect }` (un joueur avec un pseudo). Ensuite `join { skin }`, `aim { x, y }`, `split`, `eject`, `mine`, `pause`, `resume`, `leave`, `ping { n }`, `say { text }` (le chat).
+- floor envoie `welcome { size, skins }`, les images `s` (seulement les granules qui changent), `board` chaque seconde, `records`, `dead`, `kill`, `event`, `bonus`, `badge`, `pong`, `chat { from, text }` (à tous les connectés, un message toutes les 0,7 s au plus par joueur).
 - Connexion tombée en pleine vie : les cellules attendent 10 s, le joueur les reprend en se reconnectant.
 - Par adresse : 4 connexions ouvertes et 30 ouvertures par minute au plus.
 - Derrière nginx, le WebSocket a besoin de son bloc (voir `nginx/floor.conf`).

@@ -67,10 +67,19 @@ test('en ligne, invitation, partie, victoire au classement, revanche', async () 
   assert.deepEqual(board.entries.map((e) => [e.name, e.score]), [['Dio', 1]])
   assert.equal((await call('POST', '/v1/games/puissance-4/scores', { token: dio, body: {} })).status, 403)
 
+  // Le chat : nettoyé, vu des deux, et il suit dans la revanche.
+  assert.equal((await call('POST', `/v1/live/matches/${m.id}/chat`, { token: ozzy, body: { text: '  \n ' } })).status, 400)
+  s = (await call('POST', `/v1/live/matches/${m.id}/chat`, { token: ozzy, body: { text: 'bien\njoué ' + 'x'.repeat(300) } })).body
+  assert.deepEqual(s.chat.map(([n, text, mine]) => [n, text.length, mine]), [['Ozzy', 200, true]])
+  assert.ok(s.chat[0][1].startsWith('bien joué'))
+  await call('POST', `/v1/live/matches/${m.id}/chat`, { token: dio, body: { text: 'merci' } })
+  assert.deepEqual((await call('GET', `/v1/live/matches/${m.id}`, { token: dio })).body.chat.map(([n, , mine]) => [n, mine]), [['Ozzy', false], ['Dio', true]])
+
   await call('POST', `/v1/live/matches/${m.id}/rematch`, { token: dio })
   s = (await call('POST', `/v1/live/matches/${m.id}/rematch`, { token: ozzy })).body
   const next = (await call('GET', `/v1/live/matches/${s.next}`, { token: ozzy })).body
   assert.deepEqual([next.players, next.you], [['Ozzy', 'Dio'], 1])
+  assert.deepEqual(next.chat.map(([n, text]) => [n, text]).slice(1), [['Dio', 'merci']])
   await call('POST', `/v1/live/matches/${next.id}/leave`, { token: dio })
   assert.equal((await ping(ozzy)).match, null)
 })

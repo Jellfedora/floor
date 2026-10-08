@@ -1,5 +1,6 @@
 const { WebSocketServer } = require('ws')
 const { World, SIZE, mass, fxBits, skinsOf } = require('./world')
+const { clean } = require('../chat')
 
 // Le monde avance tant de fois par seconde, et les joueurs le voient une fois sur deux.
 const TICK_MS = 25
@@ -8,6 +9,8 @@ const SEND_EVERY = 2
 const BOARD_EVERY = 40
 // Au-delà, les messages d'un joueur sont ignorés (par seconde).
 const MESSAGES_MAX = 80
+// Le chat : un message au plus tous les tant (ms) par joueur.
+const SAY_EVERY = 700
 // Un joueur qui ne lit plus (tant d'octets en attente) ne reçoit plus d'images.
 const BUFFER_MAX = 256 * 1024
 // Sa connexion tombée, les cellules d'un joueur l'attendent tant (il revient s'il se reconnecte).
@@ -22,9 +25,10 @@ const PER_IP_MINUTE = 30
 //
 // Le premier message donne le jeton ({ t: 'hello', token, aspect }) : seulement avec un pseudo.
 // Ensuite { t: 'join', skin } pour entrer, { t: 'aim', x, y } (la souris, dans le monde),
-// { t: 'split' }, { t: 'eject' }, { t: 'leave' } (pour regarder), { t: 'pause' } puis { t: 'resume' }
+// { t: 'split' }, { t: 'eject' }, { t: 'mine' } (la pose derrière soi), { t: 'leave' } (pour regarder), { t: 'pause' } puis { t: 'resume' }
 // (la bulle attend, protégée, au plus PAUSE_MS : le joueur peut fermer la connexion et revenir),
-// { t: 'ping', n } (floor répond { t: 'pong', n }, pour mesurer le délai).
+// { t: 'ping', n } (floor répond { t: 'pong', n }, pour mesurer le délai), { t: 'say', text } (au chat :
+// floor l'envoie à tous, { t: 'chat', from, text }, lui compris).
 //
 // floor envoie { t: 'welcome', size, skins }, puis 20 fois par seconde ce que le joueur voit
 // ({ t: 's' }, voir `frame`), le classement chaque seconde ({ t: 'board' }), le classement des
@@ -190,8 +194,10 @@ function blob (server, db, players, { random, trustProxy = false, graceMs = GRAC
   // Ce que voit le joueur : le centre et la hauteur vue (x, y, h) ; les cellules (c : id, joueur, x,
   // y, masse, effets...) ; les granules apparues depuis la dernière image (g : id, x, y, couleur...)
   // et celles parties (gx : id...) ; la masse éjectée (e : x, y, couleur...), les virus (v : x, y...),
-  // les bonus (b : x, y, sorte...) ; les joueurs pas encore vus (n : id → [nom, couleur, skin]) ;
-  // ses effets (fx : secondes restantes de vitesse, aimant, bouclier) ; l'événement (ev : sorte, secondes).
+  // les bonus (b : x, y, sorte...), les mines (m : x, y, couleur...) ; les joueurs pas encore vus
+  // (n : id → [nom, couleur, skin]) ; ses effets (fx : secondes restantes de vitesse, aimant,
+  // bouclier ; fy : de fantôme, et ses mines) ; l'événement (ev : sorte, secondes), la zone
+  // (z : x, y, rayon), le trou noir (bh : x, y).
   function frame (client) {
     const v = world.view(client.id, client.aspect)
     const c = []
@@ -231,9 +237,13 @@ function blob (server, db, players, { random, trustProxy = false, graceMs = GRAC
       e,
       v: v.viruses.flatMap((x) => [Math.round(x.x), Math.round(x.y)]),
       b: v.bonuses.flatMap((x) => [Math.round(x.x), Math.round(x.y), x.kind]),
+      m: v.mines.flatMap((x) => [Math.round(x.x), Math.round(x.y), x.hue]),
       n,
       fx: me ? [round(me.fx.speed), round(me.fx.magnet), round(me.fx.shield)] : null,
-      ev: ev ? [ev.kind, Math.ceil(ev.until - world.time)] : null
+      fy: me ? [round(me.fx.ghost), me.mines] : null,
+      ev: ev ? [ev.kind, Math.ceil(ev.until - world.time)] : null,
+      z: ev?.kind === 'zone' ? [Math.round(ev.x), Math.round(ev.y), Math.round(ev.r)] : null,
+      bh: ev?.kind === 'hole' ? [Math.round(ev.x), Math.round(ev.y)] : null
     }
   }
 
@@ -296,6 +306,9 @@ function blob (server, db, players, { random, trustProxy = false, graceMs = GRAC
         case 'split':
           if (client.id && !world.players.get(client.id)?.paused) world.split(client.id)
           break
+        case 'mine':
+          if (client.id) world.mine(client.id)
+          break
         case 'eject':
           if (client.id && !world.players.get(client.id)?.paused) world.eject(client.id)
           break
@@ -311,6 +324,13 @@ function blob (server, db, players, { random, trustProxy = false, graceMs = GRAC
         case 'ping':
           send(client, { t: 'pong', n: msg.n })
           break
+        case 'say': {
+          const text = clean(msg.text)
+          if (!text || t - (client.said ?? 0) < SAY_EVERY) break
+          client.said = t
+          for (const c of ready()) send(c, { t: 'chat', from: client.account.name, text })
+          break
+        }
       }
     })
     ws.on('close', () => {

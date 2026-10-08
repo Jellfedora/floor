@@ -144,6 +144,101 @@ test('les bots peuplent le monde et ne se font pas tous manger', { timeout: 1500
   for (const b of bots) for (const c of b.cells) assert.ok(c.x >= 0 && c.x <= 4000 && radius(c.m) > 0)
 })
 
+test('les bots : la limite suit le plus gros joueur, le chasseur se divise et vise devant', { timeout: 15000 }, () => {
+  const world = new World({ random: seeded(9), bots: false })
+  const dio = world.join('Dio')
+  dio.cells[0].m = 3000
+  assert.equal(world.botFull(), 3750)
+  dio.cells[0].m = 200
+  assert.equal(world.botFull(), 1000)
+
+  const hunter = world.join('Lemmy', { bot: true, kind: 'hunter' })
+  Object.assign(hunter.cells[0], { x: 2000, y: 2000, m: 400 })
+  Object.assign(dio.cells[0], { x: 2250, y: 2000, m: 60 })
+  dio.target = { x: 2250, y: 3000 }
+  world.random = () => 0
+  world.thinkBot(hunter)
+  assert.equal(hunter.cells.length, 2, 'divisé pour l’attraper')
+  assert.ok(hunter.target.y > 2000, 'visé là où il va')
+
+  // Le fermier ne se divise jamais.
+  const farmer = world.join('Ozzy', { bot: true, kind: 'farmer' })
+  Object.assign(farmer.cells[0], { x: 1000, y: 1000, m: 400 })
+  Object.assign(dio.cells[0], { x: 1200, y: 1000 })
+  world.thinkBot(farmer)
+  assert.equal(farmer.cells.length, 1)
+})
+
+test('la prime : premier une minute, sa tête mise à prix ; il tient, elle tombe', { timeout: 15000 }, () => {
+  const world = new World({ random: seeded(11), bots: false })
+  const dio = world.join('Dio')
+  Object.assign(dio.cells[0], { x: 500, y: 500, m: 800 })
+  world.viruses = []
+  for (let k = 0; k < 61; k++) {
+    world.time += 1
+    world.hunt()
+  }
+  assert.ok(dio.bounty)
+  assert.deepEqual(world.drain().map((n) => [n.kind, n.on, n.name]), [['bounty', true, 'Dio']])
+  // Un bot qui peut le manger vient de loin.
+  const bot = world.join('Lemmy', { bot: true, kind: 'farmer' })
+  Object.assign(bot.cells[0], { x: 1500, y: 500, m: 2000 })
+  world.thinkBot(bot)
+  assert.ok(Math.abs(bot.target.x - 500) < 50)
+  world.leave(bot.id)
+  for (let k = 0; k < 61; k++) {
+    world.time += 1
+    world.hunt()
+  }
+  assert.ok(!dio.bounty)
+  assert.deepEqual(world.drain().map((n) => [n.kind, n.on, n.held]), [['bounty', false, true]])
+})
+
+test('la zone se resserre, le trou noir avale, le fantôme passe, la mine fait éclater', { timeout: 15000 }, () => {
+  const world = new World({ random: seeded(13) })
+  for (const p of [...world.players.values()]) world.leave(p.id)
+  world.bots = true
+  world.viruses = []
+  world.start('zone')
+  Object.assign(world.event, { x: 2000, y: 2000 })
+  const out = world.join('Dio')
+  const ghost = world.join('Ozzy')
+  Object.assign(out.cells[0], { x: 100, y: 100, m: 500 })
+  Object.assign(ghost.cells[0], { x: 3900, y: 3900, m: 500 })
+  ghost.fx.ghost = 100
+  for (const p of [out, ghost]) p.target = { x: p.cells[0].x, y: p.cells[0].y }
+  for (let k = 0; k < 40 * 46; k++) world.step(1 / 40)
+  assert.ok(Math.abs(world.event.r - 650) < 1)
+  assert.ok(mass(out) < 100, 'fondu dehors')
+  assert.ok(mass(ghost) > 400, 'le fantôme ne fond pas')
+  world.endEvent()
+
+  world.start('hole')
+  Object.assign(world.event, { x: 2000, y: 2000 })
+  const small = world.join('Rob')
+  Object.assign(small.cells[0], { x: 2300, y: 2000, m: 50 })
+  small.target = { x: 2300, y: 2000 }
+  const deaths = []
+  for (let k = 0; k < 40 * 10 && !deaths.length; k++) deaths.push(...world.step(1 / 40))
+  assert.equal(deaths[0]?.player, small, 'avalé')
+  assert.equal(deaths[0].by, 'hole')
+  world.endEvent()
+
+  // La mine : posée derrière, sans effet sur qui l'a posée, elle fait éclater le suivant.
+  ghost.fx.ghost = 0
+  ghost.mines = 1
+  Object.assign(ghost.cells[0], { x: 1000, y: 1000, m: 300 })
+  ghost.target = { x: 1500, y: 1000 }
+  world.mine(ghost.id)
+  assert.equal(world.mines.length, 1)
+  assert.ok(world.mines[0].x < 1000)
+  Object.assign(out.cells[0], { x: world.mines[0].x, y: world.mines[0].y, m: 300 })
+  out.cells.length = 1
+  world.eatMines()
+  assert.ok(out.cells.length > 1, 'éclaté')
+  assert.equal(world.mines.length, 0)
+})
+
 let server, url, app, game, db
 before(async () => {
   db = open(':memory:')
@@ -248,6 +343,25 @@ test('en ligne : sans pseudo refusé ; avec, il entre et voit le monde', { timeo
   assert.deepEqual(records.skins.find(([id]) => id === 'checker'), ['checker', 'games', 5, false, 1])
   dio.ws.close()
   await dio.closed
+})
+
+test('le chat : à tous les connectés, nettoyé, pas trop souvent', { timeout: 15000 }, async () => {
+  const dio = await connect()
+  dio.say({ t: 'hello', token: await account('Gillan') })
+  await dio.next('welcome')
+  const ozzy = await connect()
+  ozzy.say({ t: 'hello', token: await account('Blackmore') })
+  await ozzy.next('welcome')
+  dio.say({ t: 'say', text: ' salut\u0007 ' })
+  dio.say({ t: 'say', text: 'trop vite' })
+  assert.deepEqual(await ozzy.next('chat'), { t: 'chat', from: 'Gillan', text: 'salut' })
+  assert.deepEqual(await dio.next('chat'), { t: 'chat', from: 'Gillan', text: 'salut' })
+  await pause(800)
+  ozzy.say({ t: 'say', text: 'yo' })
+  assert.deepEqual(await dio.next('chat'), { t: 'chat', from: 'Blackmore', text: 'yo' })
+  dio.ws.close()
+  ozzy.ws.close()
+  await Promise.all([dio.closed, ozzy.closed])
 })
 
 test('la connexion tombée : ses cellules l’attendent, il les reprend', { timeout: 15000 }, async () => {

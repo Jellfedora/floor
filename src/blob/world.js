@@ -26,15 +26,41 @@ const HUES = 12
 const CROWD = 14
 const BOTS_MIN = 4
 // Au-delà, un bot ne chasse plus et fond deux fois plus vite : le monde ne finit pas à un seul bot géant.
+// La limite suit le plus gros joueur en vie (un peu au-dessus) : il y a toujours plus gros que lui.
 const BOT_FULL = 1000
+const BOT_ABOVE = 1.25
+const BOT_FULL_MAX = 8000
+// Les caractères des bots : le fermier mange ses granules et fuit tôt ; le chasseur se divise pour
+// tuer et vise où va sa proie ; l'opportuniste guette les morceaux d'un joueur qui vient de se
+// diviser ; le campeur reste près des virus et s'y cache.
+const KINDS = ['farmer', 'hunter', 'hunter', 'sneak', 'camper']
+const KIND = {
+  farmer: { think: [0.25, 0.4], fear: 400, splits: 0, cells: 1, hunt: 260 },
+  hunter: { think: [0.1, 0.2], fear: 260, splits: 0.85, cells: 8, hunt: Infinity },
+  sneak: { think: [0.12, 0.22], fear: 320, splits: 0.7, cells: 6, hunt: Infinity },
+  camper: { think: [0.15, 0.3], fear: 340, splits: 0.5, cells: 4, hunt: 350 }
+}
+// Jusqu'où va une moitié lancée (BOOST / BOOST_FADE), avant d'avancer à sa vitesse.
+const SPLIT_REACH = 220
+// La prime : un joueur premier depuis tant de secondes (et assez gros) est chassé par les bots.
+const BOUNTY_AFTER = 60
+const BOUNTY_MIN = 400
+const BOUNTY_TIME = 60
 
 // Les bonus : combien sur la carte, combien de temps ils durent, quand ils reviennent une fois pris.
-const BONUSES = 6
-const BONUS = { speed: 0, magnet: 1, shield: 2 }
-const BONUS_TIME = [6, 8, 4]
+// Le fantôme traverse les virus, la zone et le trou noir ; la mine se pose derrière soi (E), et fait
+// éclater le premier autre qui passe dessus.
+const BONUSES = 8
+const BONUS = { speed: 0, magnet: 1, shield: 2, ghost: 3, mine: 4 }
+const BONUS_TIME = [6, 8, 4, 7, 0]
 const BONUS_BACK = 12
-// Les effets, en bits (les autres joueurs les voient) ; `paused` : le joueur a mis sa partie en pause.
-const FX = { speed: 1, magnet: 2, shield: 4, paused: 8 }
+const MINES_MAX = 2
+const MINE_TIME = 40
+// Ce qu'il faut peser pour éclater sur une mine.
+const MINE_MIN = 60
+// Les effets, en bits (les autres joueurs les voient) ; `paused` : le joueur a mis sa partie en pause ;
+// `bounty` : sa tête est mise à prix.
+const FX = { speed: 1, magnet: 2, shield: 4, paused: 8, ghost: 16, bounty: 32 }
 
 // Les événements : le premier après tant, puis entre deux.
 const EVENT_FIRST = [60, 120]
@@ -46,6 +72,19 @@ const GOLD = 99
 const GOLD_MASS = 4
 const BOSS_MASS = 2500
 const BOSS_TIME = 90
+// La zone : un cercle qui se resserre, ce qui reste dehors fond.
+const ZONE_TIME = 60
+const ZONE_SHRINK = 45
+const ZONE_END = 650
+const ZONE_MELT = 0.07
+// Le trou noir : il attire ce qui passe près, avale les petits, ronge les gros.
+const HOLE_TIME = 40
+const HOLE_REACH = 900
+const HOLE_PULL = 260
+const HOLE_RADIUS = 70
+const HOLE_SWALLOW = 400
+const HOLE_EAT = 0.12
+const EVENTS = ['rain', 'boss', 'zone', 'hole']
 // Ronnie : rare, rapide, il fuit tout le monde.
 const RONNIE_EVERY = [180, 420]
 const RONNIE_CHANCE = 0.6
@@ -88,7 +127,8 @@ function center (p) {
 const viewHeight = (m) => 900 + Math.sqrt(m) * 45
 
 // Les effets d'un joueur, en bits.
-const fxBits = (p) => (p.fx.speed > 0 ? FX.speed : 0) | (p.fx.magnet > 0 ? FX.magnet : 0) | (p.fx.shield > 0 ? FX.shield : 0) | (p.paused ? FX.paused : 0)
+const fxBits = (p) => (p.fx.speed > 0 ? FX.speed : 0) | (p.fx.magnet > 0 ? FX.magnet : 0) | (p.fx.shield > 0 ? FX.shield : 0) |
+  (p.paused ? FX.paused : 0) | (p.fx.ghost > 0 ? FX.ghost : 0) | (p.bounty ? FX.bounty : 0)
 
 class World {
   // `bots` : false pour un monde sans bots, bonus ni événements (les tests des règles).
@@ -103,8 +143,16 @@ class World {
     this.time = 0
     // Ce qui s'est passé depuis la dernière fois (index.js l'annonce) : morts, événements, Ronnie.
     this.news = []
-    // L'événement en cours : { kind: 'rain' | 'boss', until }.
+    // L'événement en cours : { kind: 'rain' | 'boss' | 'zone' | 'hole', until } ; la zone a aussi son
+    // centre, son rayon de départ et le rayon actuel (x, y, from, r), le trou noir son centre.
     this.event = null
+    // Les mines posées : { id, x, y, owner, hue, until }.
+    this.mines = []
+    // Le joueur premier, depuis quand ; la prime en cours : { player, until }.
+    this.top = null
+    this.bounty = null
+    // Jusqu'où un bot peut grossir (voir botFull), revu à chaque pas.
+    this.full = BOT_FULL
     this.nextEvent = this.between(...EVENT_FIRST)
     this.nextRonnie = this.between(...RONNIE_EVERY)
     for (let k = 0; k < PELLETS; k++) this.pellets.push(this.pellet())
@@ -128,7 +176,7 @@ class World {
   }
 
   bonus () {
-    return { id: this.id(), ...this.free(100), kind: Math.floor(this.random() * 3), back: 0 }
+    return { id: this.id(), ...this.free(100), kind: Math.floor(this.random() * Object.keys(BONUS).length), back: 0 }
   }
 
   // Un endroit loin des cellules (au moins `room` de leur bord), sinon le meilleur de dix essais.
@@ -155,7 +203,7 @@ class World {
 
   // Un joueur entre (ou revient) : une cellule, loin des autres. `account` : son compte floor ;
   // `special` : 'boss' ou 'ronnie' (pas compté parmi les bots, pas de retour une fois mangé).
-  join (name, { bot = false, account = null, startMass = START_MASS, skin = 'plain', special = null } = {}) {
+  join (name, { bot = false, account = null, startMass = START_MASS, skin = 'plain', special = null, kind = null } = {}) {
     const p = {
       id: this.id(),
       name,
@@ -163,6 +211,10 @@ class World {
       skin,
       bot,
       special,
+      // Son caractère, pour un bot (voir KIND).
+      kind: bot && !special ? (kind ?? KINDS[Math.floor(this.random() * KINDS.length)]) : null,
+      mines: 0,
+      bounty: false,
       account,
       cells: [],
       target: null,
@@ -170,7 +222,7 @@ class World {
       kills: 0,
       born: this.time,
       think: 0,
-      fx: { speed: 0, magnet: 0, shield: 0 },
+      fx: { speed: 0, magnet: 0, shield: 0, ghost: 0 },
       // En pause depuis (Date.now()), sinon null : ses cellules ne bougent plus, ne mangent rien et
       // ne se font pas manger ; les bots l'ignorent.
       paused: null
@@ -187,7 +239,9 @@ class World {
     p.best = m
     p.kills = 0
     p.born = this.time
-    p.fx = { speed: 0, magnet: 0, shield: 0 }
+    p.fx = { speed: 0, magnet: 0, shield: 0, ghost: 0 }
+    p.mines = 0
+    p.bounty = false
   }
 
   leave (id) {
@@ -251,33 +305,54 @@ class World {
     }
   }
 
+  // Une mine posée derrière la plus grosse cellule du joueur (à l'opposé de là où il va).
+  mine (id) {
+    const p = this.players.get(id)
+    if (!p || p.paused || !p.mines || !p.cells.length) return
+    const main = p.cells.reduce((a, b) => (b.m > a.m ? b : a))
+    const dir = this.direction(main, p.target)
+    const r = radius(main.m) + 24
+    p.mines--
+    this.mines.push({ id: this.id(), x: main.x - dir.x * r, y: main.y - dir.y * r, owner: p.id, hue: p.hue, until: this.time + MINE_TIME })
+  }
+
   // Le monde avance de `dt` : ceux qui ont été mangés (le dernier morceau d'un joueur) sont rendus,
   // { player, by, best, kills, time } ; le reste de ce qui s'est passé va dans `news`.
   step (dt) {
     this.time += dt
     const deaths = []
     const fade = Math.exp(-BOOST_FADE * dt)
+    this.full = this.botFull()
+    const hole = this.event?.kind === 'hole' ? this.event : null
     for (const p of this.players.values()) {
       // En pause : tout s'arrête pour lui, ses bonus compris.
       if (p.paused) continue
       for (const k of Object.keys(p.fx)) p.fx[k] = Math.max(0, p.fx[k] - dt)
       if (p.bot && p.cells.length) {
         p.think -= dt
-        if (p.think <= 0) {
-          p.think = this.between(0.15, 0.35)
-          this.thinkBot(p)
-        }
+        if (p.think <= 0) this.thinkBot(p)
       }
       const fast = (p.fx.speed > 0 ? 1.5 : 1) * (p.special === 'ronnie' ? 1.3 : 1)
-      const full = p.bot && !p.special && mass(p) > BOT_FULL
+      const full = p.bot && !p.special && mass(p) > this.full
+      const ghost = p.fx.ghost > 0
       for (const c of p.cells) {
         const r = radius(c.m)
         const dx = p.target.x - c.x; const dy = p.target.y - c.y
         const d = Math.hypot(dx, dy)
         // Plus lente quand la cible est tout près (elle s'y arrête au lieu de trembler).
         const v = d > 0.001 ? speed(c.m) * fast * Math.min(1, d / Math.max(r, 30)) / d : 0
-        c.x += (dx * v + c.bx) * dt
-        c.y += (dy * v + c.by) * dt
+        let px = 0; let py = 0
+        // Le trou noir tire vers lui, d'autant plus qu'on est près.
+        if (hole && !ghost) {
+          const hx = hole.x - c.x; const hy = hole.y - c.y
+          const hd = Math.hypot(hx, hy)
+          if (hd < HOLE_REACH && hd > 1) {
+            const pull = HOLE_PULL * (1 - hd / HOLE_REACH) * (1 - hd / HOLE_REACH) + 40
+            px = hx / hd * pull; py = hy / hd * pull
+          }
+        }
+        c.x += (dx * v + c.bx + px) * dt
+        c.y += (dy * v + c.by + py) * dt
         c.bx *= fade
         c.by *= fade
         c.merge = Math.max(0, c.merge - dt)
@@ -289,9 +364,11 @@ class World {
       this.together(p)
     }
     this.moveEjected(fade, dt)
+    if (this.bots) this.hazards(dt, deaths)
     this.eatPellets()
     this.eatBonuses()
     this.eatViruses()
+    this.eatMines()
     // Avant les repas entre cellules : ce qu'un joueur vient de prendre compte s'il se fait manger.
     this.keepBest()
     this.eatCells(deaths)
@@ -299,8 +376,97 @@ class World {
     if (this.bots) {
       this.crowd()
       this.events(dt)
+      this.hunt(dt)
     }
     return deaths
+  }
+
+  // Jusqu'où un bot peut grossir : au-dessus du plus gros joueur en vie, jamais moins que BOT_FULL.
+  botFull () {
+    let top = 0
+    for (const p of this.players.values()) {
+      if (!p.bot && p.cells.length) top = Math.max(top, mass(p))
+    }
+    return Math.min(Math.max(BOT_FULL, top * BOT_ABOVE), BOT_FULL_MAX)
+  }
+
+  // Un joueur mangé par ce qui n'est pas un joueur (le trou noir) : sa mort, au fil si c'est un joueur.
+  die (p, by, deaths) {
+    p.cells = []
+    deaths.push({ player: p, by, best: Math.round(p.best), kills: p.kills, time: this.time - p.born })
+    if (!p.bot || p.special) this.news.push({ t: 'kill', by: [by, 0], victim: [p.name, p.id], special: p.special ?? 'hole' })
+    if (this.bounty?.player === p.id) this.endBounty()
+  }
+
+  // Ce que font la zone (dehors, on fond) et le trou noir (il avale les petits, ronge les gros).
+  hazards (dt, deaths) {
+    const ev = this.event
+    if (ev?.kind === 'zone') {
+      const k = Math.min(1, (this.time - ev.since) / ZONE_SHRINK)
+      ev.r = ev.from + (ZONE_END - ev.from) * k
+      for (const p of this.players.values()) {
+        if (p.paused || p.fx.ghost > 0 || p.special) continue
+        for (const c of p.cells) {
+          if (Math.hypot(c.x - ev.x, c.y - ev.y) > ev.r) c.m = Math.max(START_MASS, c.m - c.m * ZONE_MELT * dt)
+        }
+      }
+    } else if (ev?.kind === 'hole') {
+      for (const p of [...this.players.values()]) {
+        if (p.paused || p.fx.ghost > 0 || p.special === 'boss' || !p.cells.length) continue
+        for (const c of p.cells) {
+          if (Math.hypot(c.x - ev.x, c.y - ev.y) > HOLE_RADIUS + radius(c.m) * 0.3) continue
+          c.m = c.m < HOLE_SWALLOW ? 0 : c.m - c.m * HOLE_EAT * dt
+        }
+        p.cells = p.cells.filter((c) => c.m > 0)
+        if (!p.cells.length) this.die(p, 'hole', deaths)
+      }
+    }
+    this.mines = this.mines.filter((m) => m.until > this.time)
+  }
+
+  // Une mine sous une cellule assez grosse d'un autre : la cellule éclate (comme sur un virus).
+  eatMines () {
+    for (const mine of this.mines) {
+      for (const p of this.players.values()) {
+        if (p.id === mine.owner || p.paused || p.fx.ghost > 0) continue
+        const c = p.cells.find((c) => c.m >= MINE_MIN && Math.hypot(c.x - mine.x, c.y - mine.y) < radius(c.m))
+        if (!c) continue
+        this.burst(p, c)
+        mine.until = 0
+        break
+      }
+    }
+    this.mines = this.mines.filter((m) => m.until > 0)
+  }
+
+  // La prime : un joueur premier depuis BOUNTY_AFTER (et assez gros) a sa tête mise à prix, les bots
+  // le chassent ; elle tombe quand il meurt, ou au bout de BOUNTY_TIME (il a tenu).
+  hunt () {
+    if (this.bounty) {
+      const p = this.players.get(this.bounty.player)
+      if (!p?.cells.length) this.endBounty()
+      else if (this.time >= this.bounty.until) this.endBounty(true)
+      return
+    }
+    const first = this.leaders(1)[0]
+    if (!first || first.bot || mass(first) < BOUNTY_MIN) {
+      this.top = null
+      return
+    }
+    if (this.top?.player !== first.id) this.top = { player: first.id, since: this.time }
+    if (this.time - this.top.since < BOUNTY_AFTER) return
+    this.bounty = { player: first.id, until: this.time + BOUNTY_TIME }
+    first.bounty = true
+    this.news.push({ t: 'event', kind: 'bounty', on: true, name: first.name })
+  }
+
+  // `held` : le joueur a tenu jusqu'au bout ; la prochaine prime pas avant un moment.
+  endBounty (held = false) {
+    const p = this.players.get(this.bounty.player)
+    if (p) p.bounty = false
+    this.news.push({ t: 'event', kind: 'bounty', on: false, name: p?.name ?? '', held })
+    this.bounty = null
+    this.top = p?.cells.length ? { player: p.id, since: this.time } : null
   }
 
   // Ce qui s'est passé depuis le dernier appel.
@@ -403,7 +569,8 @@ class World {
       for (const p of this.players.values()) {
         if (p.paused || !p.cells.some((c) => Math.hypot(c.x - b.x, c.y - b.y) < radius(c.m) + 14)) continue
         const kind = Object.keys(BONUS)[b.kind]
-        p.fx[kind] = BONUS_TIME[b.kind]
+        if (kind === 'mine') p.mines = Math.min(MINES_MAX, p.mines + 1)
+        else p.fx[kind] = BONUS_TIME[b.kind]
         b.back = this.time + BONUS_BACK
         if (!p.bot) this.news.push({ t: 'bonus', player: p.id, kind })
         break
@@ -416,28 +583,32 @@ class World {
     for (const v of this.viruses) {
       const rv = radius(v.m)
       for (const p of this.players.values()) {
-        if (p.paused) continue
+        if (p.paused || p.fx.ghost > 0) continue
         const c = p.cells.find((c) => c.m >= v.m * EAT_RATIO && Math.hypot(c.x - v.x, c.y - v.y) < radius(c.m) - rv * 0.4)
         if (!c) continue
         c.m += v.m
-        const pieces = Math.min(MAX_CELLS - p.cells.length, 8)
-        if (pieces > 0) {
-          const share = c.m / (pieces + 1)
-          c.m = share
-          c.merge = mergeTime(share * (pieces + 1))
-          const turn = this.random() * Math.PI * 2
-          for (let k = 0; k < pieces; k++) {
-            const a = turn + (k / pieces) * Math.PI * 2
-            const piece = this.cell(c.x, c.y, share)
-            piece.bx = Math.cos(a) * BOOST * 0.7
-            piece.by = Math.sin(a) * BOOST * 0.7
-            piece.merge = c.merge
-            p.cells.push(piece)
-          }
-        }
+        this.burst(p, c)
         Object.assign(v, this.free(200))
         break
       }
+    }
+  }
+
+  // Une cellule éclate en morceaux lancés tout autour.
+  burst (p, c) {
+    const pieces = Math.min(MAX_CELLS - p.cells.length, 8)
+    if (pieces <= 0) return
+    const share = c.m / (pieces + 1)
+    c.m = share
+    c.merge = mergeTime(share * (pieces + 1))
+    const turn = this.random() * Math.PI * 2
+    for (let k = 0; k < pieces; k++) {
+      const a = turn + (k / pieces) * Math.PI * 2
+      const piece = this.cell(c.x, c.y, share)
+      piece.bx = Math.cos(a) * BOOST * 0.7
+      piece.by = Math.sin(a) * BOOST * 0.7
+      piece.merge = c.merge
+      p.cells.push(piece)
     }
   }
 
@@ -464,10 +635,11 @@ class World {
           deaths.push({ player: small.p, by: big.p.name, best: Math.round(small.p.best), kills: small.p.kills, time: this.time - small.p.born })
           // Au fil des morts : celles qui touchent un joueur, et les spéciaux.
           if (!big.p.bot || !small.p.bot || small.p.special) {
-            this.news.push({ t: 'kill', by: [big.p.name, big.p.id], victim: [small.p.name, small.p.id], special: small.p.special })
+            this.news.push({ t: 'kill', by: [big.p.name, big.p.id], victim: [small.p.name, small.p.id], special: small.p.special ?? (small.p.bounty ? 'bounty' : null) })
           }
           if (small.p.special === 'ronnie' && !big.p.bot) this.news.push({ t: 'ronnie', player: big.p.id, account: big.p.account })
           if (small.p.special === 'boss' && this.event?.kind === 'boss') this.endEvent()
+          if (this.bounty?.player === small.p.id) this.endBounty()
         }
       }
     }
@@ -525,7 +697,9 @@ class World {
         this.endEvent()
       }
     } else if (this.time >= this.nextEvent) {
-      this.start(this.lastEvent === 'rain' ? 'boss' : 'rain')
+      // Au hasard, jamais deux fois le même de suite.
+      const next = EVENTS.filter((k) => k !== this.lastEvent)
+      this.start(next[Math.floor(this.random() * next.length)])
     }
     const ronnie = [...this.players.values()].find((p) => p.special === 'ronnie')
     if (ronnie && this.time - ronnie.born > RONNIE_TIME) {
@@ -542,6 +716,14 @@ class World {
     this.lastEvent = kind
     if (kind === 'rain') {
       this.event = { kind, until: this.time + RAIN_TIME }
+    } else if (kind === 'zone') {
+      // Autour d'un point pas trop près du bord ; au départ, assez grand pour couvrir presque tout.
+      const x = this.between(SIZE * 0.3, SIZE * 0.7); const y = this.between(SIZE * 0.3, SIZE * 0.7)
+      const from = SIZE * 0.75
+      this.event = { kind, until: this.time + ZONE_TIME, since: this.time, x, y, from, r: from }
+    } else if (kind === 'hole') {
+      const at = this.free(400)
+      this.event = { kind, until: this.time + HOLE_TIME, x: at.x, y: at.y }
     } else {
       this.event = { kind, until: this.time + BOSS_TIME }
       this.join('Boss', { bot: true, special: 'boss', startMass: BOSS_MASS, skin: 'boss' })
@@ -560,47 +742,90 @@ class World {
     this.nextEvent = this.time + this.between(...EVENT_EVERY)
   }
 
-  // Un bot regarde autour de lui : il fuit plus gros, chasse plus petit (en se divisant parfois pour
-  // l'attraper), sinon va vers les bonus proches et les granules. Ronnie fuit tout le monde ; le boss
-  // chasse sans jamais être rassasié.
+  // Un bot regarde autour de lui : il fuit plus gros (et le trou noir, la zone), chasse plus petit (en
+  // se divisant pour l'attraper, selon son caractère), sinon va vers les bonus proches et les
+  // granules. Ronnie fuit tout le monde ; le boss chasse sans jamais être rassasié. Une tête mise à
+  // prix attire tous les bots qui peuvent la manger.
   thinkBot (p) {
     const at = center(p)
     const main = p.cells.reduce((a, b) => (b.m > a.m ? b : a))
+    const kind = KIND[p.kind] ?? KIND.hunter
+    p.think = this.between(...kind.think)
     const reach = 500 + radius(main.m) * 4
-    const hungry = p.special === 'boss' || (p.special !== 'ronnie' && mass(p) < BOT_FULL)
+    const hungry = p.special === 'boss' || (p.special !== 'ronnie' && mass(p) < this.full)
+    const ev = this.event
     let fleeX = 0; let fleeY = 0
+    const flee = (x, y, w) => {
+      const d = Math.max(Math.hypot(at.x - x, at.y - y), 1)
+      fleeX += (at.x - x) / d * w
+      fleeY += (at.y - y) / d * w
+    }
+    // Le trou noir, et le dehors de la zone : à fuir avant tout.
+    if (ev?.kind === 'hole' && p.special !== 'boss' && p.fx.ghost <= 0) {
+      const d = Math.hypot(ev.x - at.x, ev.y - at.y)
+      if (d < HOLE_REACH * 0.9) flee(ev.x, ev.y, 1 / Math.max(d - HOLE_RADIUS, 20) * 3)
+    }
+    if (ev?.kind === 'zone' && !p.special && p.fx.ghost <= 0) {
+      const d = Math.hypot(ev.x - at.x, ev.y - at.y)
+      if (d > ev.r - 150 - radius(main.m)) {
+        p.target = { x: ev.x, y: ev.y }
+        return
+      }
+    }
     let prey = null; let preyScore = 0
     for (const o of this.players.values()) {
       if (o === p || o.paused) continue
+      // Les morceaux d'un joueur qui vient de se diviser : ce que guette l'opportuniste.
+      const scattered = o.cells.length > 1
+      const wanted = o.bounty ? 4 : 1
       for (const c of o.cells) {
         const d = Math.hypot(c.x - at.x, c.y - at.y)
-        if (d > reach) continue
+        if (d > reach * (o.bounty ? 2 : 1)) continue
         const gap = d - radius(c.m) - radius(main.m)
-        const scary = p.special === 'ronnie' ? gap < 450 : c.m > main.m * EAT_RATIO * 0.95 && gap < 320
+        const scary = p.special === 'ronnie' ? gap < 450 : c.m > main.m * EAT_RATIO * 0.95 && gap < kind.fear
         if (scary) {
-          const w = 1 / Math.max(gap + 60, 20)
-          fleeX += (at.x - c.x) / Math.max(d, 1) * w
-          fleeY += (at.y - c.y) / Math.max(d, 1) * w
-        } else if (main.m > c.m * EAT_RATIO && hungry && o.fx.shield <= 0) {
-          const score = c.m / Math.max(d, 1)
+          flee(c.x, c.y, 1 / Math.max(gap + 60, 20))
+        } else if (main.m > c.m * EAT_RATIO && (hungry || (o.bounty && p.special !== 'ronnie')) && o.fx.shield <= 0 && (gap < kind.hunt || o.bounty || p.special)) {
+          const score = c.m / Math.max(d, 1) * wanted * (p.kind === 'sneak' && scattered ? 2.5 : 1) * (o.bot ? 1 : 1.3)
           if (score > preyScore) {
-            prey = { c, d }; preyScore = score
+            prey = { c, d, o }; preyScore = score
           }
         }
       }
     }
+    // Gros, les virus font éclater : le chasseur et l'opportuniste les contournent.
+    if ((p.kind === 'hunter' || p.kind === 'sneak') && main.m >= VIRUS_MASS * EAT_RATIO) {
+      for (const v of this.viruses) {
+        const gap = Math.hypot(v.x - at.x, v.y - at.y) - radius(main.m)
+        if (gap < 80) flee(v.x, v.y, 1 / Math.max(gap + 60, 20) * 0.6)
+      }
+    }
     if (fleeX || fleeY) {
-      const n = Math.hypot(fleeX, fleeY)
-      p.target = { x: at.x + fleeX / n * 600, y: at.y + fleeY / n * 600 }
-      // Coincé contre un bord : il le longe.
-      if (p.target.x < 100 || p.target.x > SIZE - 100) p.target.y += (p.target.y < SIZE / 2 ? 1 : -1) * 600
-      if (p.target.y < 100 || p.target.y > SIZE - 100) p.target.x += (p.target.x < SIZE / 2 ? 1 : -1) * 600
+      // Le campeur, petit, file se cacher sous le virus le plus proche (les gros ne l'y suivent pas).
+      const hide = p.kind === 'camper' && main.m < VIRUS_MASS && this.nearestVirus(at, 700)
+      if (hide) {
+        p.target = { x: hide.x, y: hide.y }
+      } else {
+        const n = Math.hypot(fleeX, fleeY)
+        p.target = { x: at.x + fleeX / n * 600, y: at.y + fleeY / n * 600 }
+        // Coincé contre un bord : il le longe.
+        if (p.target.x < 100 || p.target.x > SIZE - 100) p.target.y += (p.target.y < SIZE / 2 ? 1 : -1) * 600
+        if (p.target.y < 100 || p.target.y > SIZE - 100) p.target.x += (p.target.x < SIZE / 2 ? 1 : -1) * 600
+      }
+      // Chassé, avec une mine : il la pose derrière lui.
+      if (p.mines && this.random() < 0.5) this.mine(p.id)
       return
     }
     if (prey) {
-      p.target = { x: prey.c.x, y: prey.c.y }
-      const close = prey.d - radius(main.m) < 230
-      if (close && main.m >= SPLIT_MIN && prey.c.m * EAT_RATIO * 2 < main.m && p.cells.length < 4 && this.random() < 0.4) this.split(p.id)
+      // Il vise où va sa proie (le chasseur), sinon où elle est.
+      const lead = p.kind === 'hunter' || p.special === 'boss' ? Math.min(prey.d / speed(main.m), 0.6) : 0
+      const dir = this.direction(prey.c, prey.o.target)
+      const v = speed(prey.c.m)
+      p.target = { x: prey.c.x + dir.x * v * lead, y: prey.c.y + dir.y * v * lead }
+      // Se diviser : si la moitié l'atteint et la mange, et que rien de plus gros ne guette la moitié.
+      const half = main.m / 2
+      const close = prey.d < SPLIT_REACH + radius(half)
+      if (close && half >= SPLIT_MIN / 2 && half > prey.c.m * EAT_RATIO && p.cells.length < kind.cells && this.random() < kind.splits && this.safe(p, at, half)) this.split(p.id)
       return
     }
     const bonus = this.bonuses.find((b) => !b.back && Math.hypot(b.x - at.x, b.y - at.y) < 400)
@@ -608,15 +833,41 @@ class World {
       p.target = { x: bonus.x, y: bonus.y }
       return
     }
-    // La granule la plus proche (avec un peu de hasard, pour que les bots ne se suivent pas tous).
+    // La granule la plus proche (avec un peu de hasard, pour que les bots ne se suivent pas tous) ; le
+    // campeur reste près de son virus.
+    const home = p.kind === 'camper' && main.m < VIRUS_MASS * 1.5 ? this.nearestVirus(at, Infinity) : null
     let best = null; let bestD = Infinity
     for (const g of this.pellets) {
+      if (home && Math.hypot(g.x - home.x, g.y - home.y) > 450) continue
       const d = Math.hypot(g.x - at.x, g.y - at.y) * (0.8 + this.random() * 0.4) * (g.gold ? 0.5 : 1)
       if (d < bestD) {
         best = g; bestD = d
       }
     }
     if (best) p.target = { x: best.x, y: best.y }
+    else if (home) p.target = { x: home.x, y: home.y }
+  }
+
+  nearestVirus (at, within) {
+    let best = null; let bestD = within
+    for (const v of this.viruses) {
+      const d = Math.hypot(v.x - at.x, v.y - at.y)
+      if (d < bestD) {
+        best = v; bestD = d
+      }
+    }
+    return best
+  }
+
+  // Une moitié de `half` lancée d'ici serait-elle en sûreté (rien qui la mange autour) ?
+  safe (p, at, half) {
+    for (const o of this.players.values()) {
+      if (o === p || o.paused) continue
+      for (const c of o.cells) {
+        if (c.m > half * EAT_RATIO && Math.hypot(c.x - at.x, c.y - at.y) < 500 + radius(c.m)) return false
+      }
+    }
+    return true
   }
 
   // Ce que voit un joueur (ou un spectateur, qui suit le premier du classement) : le centre et la
@@ -643,7 +894,8 @@ class World {
       cells,
       pellets: this.pellets.filter((g) => seen(g.x, g.y, 20)),
       viruses: this.viruses.filter((v) => seen(v.x, v.y, radius(v.m))),
-      bonuses: this.bonuses.filter((b) => !b.back && seen(b.x, b.y, 20))
+      bonuses: this.bonuses.filter((b) => !b.back && seen(b.x, b.y, 20)),
+      mines: this.mines.filter((m) => seen(m.x, m.y, 20))
     }
   }
 
@@ -665,4 +917,4 @@ function skinsOf ({ games = 0, kills = 0, best = 0, badges = [] } = {}) {
   })
 }
 
-module.exports = { World, SIZE, HUES, GOLD, START_MASS, VIRUS_MASS, MAX_CELLS, SKINS, BONUS, FX, radius, mass, center, fxBits, skinsOf }
+module.exports = { World, SIZE, HUES, GOLD, START_MASS, VIRUS_MASS, MAX_CELLS, SKINS, BONUS, FX, KINDS, radius, mass, center, fxBits, skinsOf }

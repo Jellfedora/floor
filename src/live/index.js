@@ -3,6 +3,7 @@ const express = require('express')
 const { HttpError } = require('../players')
 const { nameKey } = require('../names')
 const c4 = require('./connect4')
+const { clean, CHAT_KEEP } = require('../chat')
 
 // En ligne : vu depuis moins de tant (Ronnie se signale toutes les quelques secondes, avec un pseudo).
 const ONLINE_MS = 25 * 1000
@@ -53,7 +54,8 @@ function live (db, players, { now = Date.now } = {}) {
   }
 
   function start (first, second) {
-    const m = { id: crypto.randomUUID(), players: [first, second], columns: c4.empty(), turn: 1, moves: 0, last: null, over: false, winner: null, reason: null, line: null, rematch: [false, false], next: null }
+    // `chat` : les messages des deux joueurs ({ player, text }), qui suivent dans la revanche.
+    const m = { id: crypto.randomUUID(), players: [first, second], columns: c4.empty(), turn: 1, moves: 0, last: null, over: false, winner: null, reason: null, line: null, rematch: [false, false], next: null, chat: [] }
     matches.set(m.id, m)
     return m
   }
@@ -74,7 +76,9 @@ function live (db, players, { now = Date.now } = {}) {
       reason: m.reason,
       line: m.line,
       rematch: { you: m.rematch[you - 1], them: m.rematch[2 - you] },
-      next: m.next
+      next: m.next,
+      // [nom, texte, le sien]...
+      chat: m.chat.map((c) => [name(c.player), c.text, c.player === id])
     }
   }
 
@@ -189,6 +193,16 @@ function live (db, players, { now = Date.now } = {}) {
     res.json(view(m, req.player.id))
   })
 
+  // Un message à l'autre joueur, pendant la partie ou après.
+  router.post('/matches/:id/chat', (req, res) => {
+    const m = match(req)
+    const text = clean(req.body?.text)
+    if (!text) throw new HttpError(400, 'Message vide')
+    m.chat.push({ player: req.player.id, text })
+    m.chat.splice(0, Math.max(0, m.chat.length - CHAT_KEEP))
+    res.json(view(m, req.player.id))
+  })
+
   // Une revanche quand les deux la demandent : l'autre commence.
   router.post('/matches/:id/rematch', (req, res) => {
     const m = match(req)
@@ -198,7 +212,9 @@ function live (db, players, { now = Date.now } = {}) {
     if (m.rematch[0] && m.rematch[1] && !m.next) {
       if (!online(a) || !online(b)) throw new HttpError(409, 'Joueur hors ligne')
       if (playing(a) || playing(b)) throw new HttpError(409, 'Déjà en partie')
-      m.next = start(b, a).id
+      const next = start(b, a)
+      next.chat = [...m.chat]
+      m.next = next.id
     }
     res.json(view(m, req.player.id))
   })
