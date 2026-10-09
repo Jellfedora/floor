@@ -152,7 +152,8 @@ function blob (server, db, players, { random, trustProxy = false, graceMs = GRAC
     }
     if (ticks % BOARD_EVERY === 0) {
       const all = world.leaders(Infinity)
-      const leaders = all.slice(0, 10)
+      // Tout le classement (Ronnie en montre ce qui tient dans sa hauteur), borné par prudence.
+      const leaders = all.slice(0, 50)
       const humans = [...world.players.values()].filter((p) => !p.bot).length
       const watching = ready().length
       for (const client of ready()) {

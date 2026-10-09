@@ -316,7 +316,9 @@ test('en ligne : sans pseudo refusé ; avec, il entre et voit le monde', { timeo
   let board
   do board = await dio.next('board'); while (!board.me)
   assert.equal(board.playing, 1)
-  assert.equal(board.l.length, 10)
+  // Tout le classement, pas seulement les dix premiers : lui compris, avec les bots.
+  assert.ok(board.l.length > 10, `${board.l.length} lignes`)
+  assert.ok(board.l.some(([, , me]) => me))
   // Les bots marqués, lui non.
   assert.ok(board.l.filter(([, , me]) => !me).every(([, , , bot]) => bot))
   assert.ok(board.l.filter(([, , me]) => me).every(([, , , bot]) => !bot))
