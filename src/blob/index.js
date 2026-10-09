@@ -252,8 +252,9 @@ function blob (server, db, players, { random, trustProxy = false, graceMs = GRAC
       n,
       fx: me ? [round(me.fx.speed), round(me.fx.magnet), round(me.fx.shield)] : null,
       fy: me ? [round(me.fx.ghost), me.mines] : null,
-      // Le premier des événements en cours (pour les Ronnie d'avant), et tous.
-      ev: events[0] ?? null,
+      // Un des événements en cours pour les Ronnie d'avant (qui n'en lisent qu'un) : la nuit d'abord,
+      // elle seule change ce qu'ils voient ; et tous.
+      ev: events.find(([kind]) => kind === 'night') ?? events[0] ?? null,
       es: events,
       z: zone ? [Math.round(zone.x), Math.round(zone.y), Math.round(zone.r)] : null,
       bh: hole ? [Math.round(hole.x), Math.round(hole.y)] : null,
