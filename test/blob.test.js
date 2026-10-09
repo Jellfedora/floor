@@ -445,3 +445,70 @@ test('pas plus de tant de connexions par adresse', { timeout: 15000 }, async () 
   other.closeAllConnections()
   other.close()
 })
+
+test('le rush : tout le monde va plus vite, 30 s', () => {
+  const world = new World({ random: seeded(5), bots: false })
+  world.viruses = []
+  const dio = world.join('Dio')
+  const run = () => {
+    Object.assign(dio.cells[0], { x: 1000, y: 2000, m: 50 })
+    dio.target = { x: 3500, y: 2000 }
+    for (let k = 0; k < 40; k++) world.step(1 / 40)
+    return dio.cells[0].x - 1000
+  }
+  const calm = run()
+  world.start('rush')
+  assert.equal(world.event.until - world.time, 30)
+  const rushed = run()
+  assert.ok(rushed > calm * 1.5, `${calm} puis ${rushed}`)
+  world.endEvent()
+})
+
+test('le festin, la colline, les météorites', () => {
+  const world = new World({ random: seeded(9), bots: false })
+  world.viruses = []
+  world.bots = true
+  for (const p of [...world.players.values()]) world.leave(p.id)
+  const dio = world.join('Dio')
+  // Le festin : une granule ordinaire vaut trois fois plus.
+  world.start('feast')
+  Object.assign(dio.cells[0], { x: 1000, y: 1000, m: 50 })
+  world.pellets = [{ id: 1, x: 1000, y: 1000, hue: 0, m: 2, vx: 0, vy: 0, ejected: false, gold: false }]
+  world.eatPellets()
+  assert.equal(dio.cells[0].m, 56)
+  world.endEvent()
+
+  // La colline : dedans on grossit, dehors non.
+  world.start('hill')
+  Object.assign(world.event, { x: 2000, y: 2000 })
+  const out = world.join('Ozzy')
+  Object.assign(dio.cells[0], { x: 2000, y: 2000, m: 50 })
+  Object.assign(out.cells[0], { x: 500, y: 500, m: 50 })
+  for (const p of [dio, out]) p.target = { x: p.cells[0].x, y: p.cells[0].y }
+  for (let k = 0; k < 40 * 4; k++) world.hazards(1 / 40, [])
+  assert.ok(Math.abs(dio.cells[0].m - 150) < 1, `${dio.cells[0].m}`)
+  assert.equal(out.cells[0].m, 50)
+  world.endEvent()
+
+  // Les météorites : elles s'annoncent, puis font éclater ce qui est dessous ; le bouclier protège.
+  world.start('meteors')
+  Object.assign(dio.cells[0], { x: 2000, y: 2000, m: 300 })
+  Object.assign(out.cells[0], { x: 2050, y: 2000, m: 300 })
+  out.fx.shield = 100
+  world.event.next = Infinity
+  world.event.falling.push({ id: 1, x: 2000, y: 2000, r: 150, at: world.time + 2, hit: false })
+  world.hazards(1 / 40, [])
+  assert.equal(dio.cells.length, 1, 'pas encore')
+  world.time += 2
+  world.hazards(1 / 40, [])
+  assert.ok(dio.cells.length > 1, 'éclaté')
+  assert.equal(out.cells.length, 1, 'le bouclier')
+  world.time += 1
+  world.hazards(1 / 40, [])
+  assert.equal(world.event.falling.length, 0)
+  // Elles tombent d'elles-mêmes.
+  world.event.next = world.time
+  world.hazards(1 / 40, [])
+  assert.equal(world.event.falling.length, 1)
+  world.endEvent()
+})

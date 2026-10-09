@@ -1,5 +1,5 @@
 const { WebSocketServer } = require('ws')
-const { World, SIZE, mass, fxBits, skinsOf } = require('./world')
+const { World, SIZE, HILL_R, mass, fxBits, skinsOf } = require('./world')
 const { clean } = require('../chat')
 
 // Le monde avance tant de fois par seconde, et les joueurs le voient une fois sur deux.
@@ -244,7 +244,10 @@ function blob (server, db, players, { random, trustProxy = false, graceMs = GRAC
       fy: me ? [round(me.fx.ghost), me.mines] : null,
       ev: ev ? [ev.kind, Math.ceil(ev.until - world.time)] : null,
       z: ev?.kind === 'zone' ? [Math.round(ev.x), Math.round(ev.y), Math.round(ev.r)] : null,
-      bh: ev?.kind === 'hole' ? [Math.round(ev.x), Math.round(ev.y)] : null
+      bh: ev?.kind === 'hole' ? [Math.round(ev.x), Math.round(ev.y)] : null,
+      // Les météorites : x, y, rayon, dixièmes de seconde avant l'impact (négatif : tombée).
+      mt: ev?.kind === 'meteors' ? ev.falling.flatMap((m) => [Math.round(m.x), Math.round(m.y), Math.round(m.r), Math.round((m.at - world.time) * 10)]) : null,
+      hl: ev?.kind === 'hill' ? [Math.round(ev.x), Math.round(ev.y), HILL_R] : null
     }
   }
 

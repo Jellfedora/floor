@@ -1,8 +1,9 @@
 // Ronnie.io, un jeu comme agar.io : des cellules dans un monde fermé mangent les granules et les
 // cellules plus petites, se divisent pour les attraper, éclatent sur les virus. Ici les règles et le
 // monde, que floor fait tourner pour tous (voir index.js) ; des bots le peuplent quand il y a peu de
-// joueurs. Des bonus traînent (vitesse, aimant, bouclier), des événements passent (une pluie de
-// granules dorées, un boss), et Ronnie, rose, apparaît parfois : qui le mange gagne son skin.
+// joueurs. Des bonus traînent (vitesse, aimant, bouclier, fantôme, mine), des événements passent (une pluie de
+// granules dorées, un boss, la zone, le trou noir, le rush, la nuit, les météorites, la colline, le festin),
+// et Ronnie, rose, apparaît parfois : qui le mange gagne son skin.
 // Les distances sont en unités du monde, les temps en secondes.
 
 const SIZE = 4000
@@ -84,7 +85,26 @@ const HOLE_PULL = 260
 const HOLE_RADIUS = 70
 const HOLE_SWALLOW = 400
 const HOLE_EAT = 0.12
-const EVENTS = ['rain', 'boss', 'zone', 'hole']
+// Le rush : tout le monde va bien plus vite.
+const RUSH_TIME = 30
+const RUSH_SPEED = 1.6
+// La nuit : on ne voit plus qu'autour de soi (Ronnie la dessine, rien ne change ici).
+const NIGHT_TIME = 35
+// Les météorites : un cercle au sol, qui frappe METEOR_WARN plus tard et fait éclater ce qui est dedans.
+const METEOR_TIME = 40
+const METEOR_EVERY = [0.5, 1.1]
+const METEOR_WARN = 2
+const METEOR_R = [130, 230]
+// Après l'impact, encore là un instant (Ronnie dessine l'explosion).
+const METEOR_AFTER = 0.6
+// La colline : un cercle où l'on gagne de la masse (la plus grosse cellule dedans, de chaque joueur).
+const HILL_TIME = 45
+const HILL_R = 420
+const HILL_GAIN = 25
+// Le festin : les granules ordinaires valent tant de fois plus.
+const FEAST_TIME = 30
+const FEAST = 3
+const EVENTS = ['rain', 'boss', 'zone', 'hole', 'rush', 'night', 'meteors', 'hill', 'feast']
 // Ronnie : rare, rapide, il fuit tout le monde.
 const RONNIE_EVERY = [180, 420]
 const RONNIE_CHANCE = 0.6
@@ -143,8 +163,9 @@ class World {
     this.time = 0
     // Ce qui s'est passé depuis la dernière fois (index.js l'annonce) : morts, événements, Ronnie.
     this.news = []
-    // L'événement en cours : { kind: 'rain' | 'boss' | 'zone' | 'hole', until } ; la zone a aussi son
-    // centre, son rayon de départ et le rayon actuel (x, y, from, r), le trou noir son centre.
+    // L'événement en cours : { kind, until } (voir EVENTS) ; la zone a aussi son centre, son rayon de
+    // départ et le rayon actuel (x, y, from, r), le trou noir et la colline leur centre, les météorites
+    // celles qui vont tomber ({ id, x, y, r, at }) et quand vient la suivante.
     this.event = null
     // Les mines posées : { id, x, y, owner, hue, until }.
     this.mines = []
@@ -324,6 +345,7 @@ class World {
     const fade = Math.exp(-BOOST_FADE * dt)
     this.full = this.botFull()
     const hole = this.event?.kind === 'hole' ? this.event : null
+    const rush = this.event?.kind === 'rush' ? RUSH_SPEED : 1
     for (const p of this.players.values()) {
       // En pause : tout s'arrête pour lui, ses bonus compris.
       if (p.paused) continue
@@ -332,7 +354,7 @@ class World {
         p.think -= dt
         if (p.think <= 0) this.thinkBot(p)
       }
-      const fast = (p.fx.speed > 0 ? 1.5 : 1) * (p.special === 'ronnie' ? 1.3 : 1)
+      const fast = (p.fx.speed > 0 ? 1.5 : 1) * (p.special === 'ronnie' ? 1.3 : 1) * rush
       const full = p.bot && !p.special && mass(p) > this.full
       const ghost = p.fx.ghost > 0
       for (const c of p.cells) {
@@ -420,8 +442,39 @@ class World {
         p.cells = p.cells.filter((c) => c.m > 0)
         if (!p.cells.length) this.die(p, 'hole', deaths)
       }
+    } else if (ev?.kind === 'meteors') {
+      if (this.time < ev.until - METEOR_WARN && this.time >= ev.next) {
+        ev.next = this.time + this.between(...METEOR_EVERY)
+        ev.falling.push({ id: this.id(), ...this.meteorSpot(), r: this.between(...METEOR_R), at: this.time + METEOR_WARN, hit: false })
+      }
+      for (const m of ev.falling) {
+        if (m.hit || this.time < m.at) continue
+        m.hit = true
+        for (const p of this.players.values()) {
+          if (p.paused || p.fx.ghost > 0 || p.fx.shield > 0 || p.special === 'boss') continue
+          for (const c of [...p.cells]) {
+            if (c.m >= MINE_MIN && Math.hypot(c.x - m.x, c.y - m.y) < m.r + radius(c.m) * 0.5) this.burst(p, c)
+          }
+        }
+      }
+      ev.falling = ev.falling.filter((m) => this.time < m.at + METEOR_AFTER)
+    } else if (ev?.kind === 'hill') {
+      for (const p of this.players.values()) {
+        if (p.paused) continue
+        const inside = p.cells.filter((c) => Math.hypot(c.x - ev.x, c.y - ev.y) < HILL_R)
+        if (inside.length) inside.reduce((a, b) => (b.m > a.m ? b : a)).m += HILL_GAIN * dt
+      }
     }
     this.mines = this.mines.filter((m) => m.until > this.time)
+  }
+
+  // Où tombe une météorite : souvent près d'un joueur en vie (pas les bots), sinon n'importe où.
+  meteorSpot () {
+    const humans = [...this.players.values()].filter((p) => !p.bot && !p.paused && p.cells.length)
+    const at = humans.length && this.random() < 0.6 ? center(humans[Math.floor(this.random() * humans.length)]) : null
+    const x = at ? at.x + this.between(-350, 350) : this.between(150, SIZE - 150)
+    const y = at ? at.y + this.between(-350, 350) : this.between(150, SIZE - 150)
+    return { x: Math.min(Math.max(x, 0), SIZE), y: Math.min(Math.max(y, 0), SIZE) }
   }
 
   // Une mine sous une cellule assez grosse d'un autre : la cellule éclate (comme sur un virus).
@@ -530,6 +583,7 @@ class World {
   // ailleurs (avec un autre id), la masse éjectée et l'or disparaissent.
   eatPellets () {
     let gone = false
+    const feast = this.event?.kind === 'feast' ? FEAST : 1
     for (const p of this.players.values()) {
       if (p.paused) continue
       const pull = p.fx.magnet > 0
@@ -545,7 +599,7 @@ class World {
           if (d2 > r2) continue
           // La masse éjectée : pas tant qu'elle file encore, ni par l'aimant.
           if (g.ejected && (Math.hypot(g.vx, g.vy) > 200 || d2 > body * body)) continue
-          c.m += g.m
+          c.m += g.ejected || g.gold ? g.m : g.m * feast
           if (g.ejected || g.gold) {
             g.m = 0
             gone = true
@@ -711,7 +765,7 @@ class World {
     }
   }
 
-  // Un événement commence : 'rain' ou 'boss'.
+  // Un événement commence (voir EVENTS).
   start (kind) {
     this.lastEvent = kind
     if (kind === 'rain') {
@@ -724,6 +778,17 @@ class World {
     } else if (kind === 'hole') {
       const at = this.free(400)
       this.event = { kind, until: this.time + HOLE_TIME, x: at.x, y: at.y }
+    } else if (kind === 'rush') {
+      this.event = { kind, until: this.time + RUSH_TIME }
+    } else if (kind === 'night') {
+      this.event = { kind, until: this.time + NIGHT_TIME }
+    } else if (kind === 'meteors') {
+      this.event = { kind, until: this.time + METEOR_TIME, next: this.time + 1, falling: [] }
+    } else if (kind === 'hill') {
+      const x = this.between(SIZE * 0.25, SIZE * 0.75); const y = this.between(SIZE * 0.25, SIZE * 0.75)
+      this.event = { kind, until: this.time + HILL_TIME, x, y }
+    } else if (kind === 'feast') {
+      this.event = { kind, until: this.time + FEAST_TIME }
     } else {
       this.event = { kind, until: this.time + BOSS_TIME }
       this.join('Boss', { bot: true, special: 'boss', startMass: BOSS_MASS, skin: 'boss' })
@@ -764,6 +829,13 @@ class World {
     if (ev?.kind === 'hole' && p.special !== 'boss' && p.fx.ghost <= 0) {
       const d = Math.hypot(ev.x - at.x, ev.y - at.y)
       if (d < HOLE_REACH * 0.9) flee(ev.x, ev.y, 1 / Math.max(d - HOLE_RADIUS, 20) * 3)
+    }
+    // Les météorites qui vont tomber : à quitter, quand on est assez gros pour éclater.
+    if (ev?.kind === 'meteors' && main.m >= MINE_MIN && p.special !== 'boss') {
+      for (const m of ev.falling) {
+        const d = Math.hypot(m.x - at.x, m.y - at.y)
+        if (!m.hit && d < m.r + radius(main.m) + 60) flee(m.x, m.y, 1 / Math.max(d, 20) * 4)
+      }
     }
     if (ev?.kind === 'zone' && !p.special && p.fx.ghost <= 0) {
       const d = Math.hypot(ev.x - at.x, ev.y - at.y)
@@ -826,6 +898,12 @@ class World {
       const half = main.m / 2
       const close = prey.d < SPLIT_REACH + radius(half)
       if (close && half >= SPLIT_MIN / 2 && half > prey.c.m * EAT_RATIO && p.cells.length < kind.cells && this.random() < kind.splits && this.safe(p, at, half)) this.split(p.id)
+      return
+    }
+    // La colline : les bots qui ont faim y montent (rien à chasser, rien à fuir).
+    if (ev?.kind === 'hill' && hungry && Math.hypot(ev.x - at.x, ev.y - at.y) < 1800) {
+      const a = (p.id * 2.4) % (Math.PI * 2)
+      p.target = { x: ev.x + Math.cos(a) * HILL_R * 0.5, y: ev.y + Math.sin(a) * HILL_R * 0.5 }
       return
     }
     const bonus = this.bonuses.find((b) => !b.back && Math.hypot(b.x - at.x, b.y - at.y) < 400)
@@ -917,4 +995,4 @@ function skinsOf ({ games = 0, kills = 0, best = 0, badges = [] } = {}) {
   })
 }
 
-module.exports = { World, SIZE, HUES, GOLD, START_MASS, VIRUS_MASS, MAX_CELLS, SKINS, BONUS, FX, KINDS, radius, mass, center, fxBits, skinsOf }
+module.exports = { World, SIZE, HILL_R, HUES, GOLD, START_MASS, VIRUS_MASS, MAX_CELLS, SKINS, BONUS, FX, KINDS, radius, mass, center, fxBits, skinsOf }
