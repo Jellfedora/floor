@@ -64,8 +64,8 @@ const MINE_MIN = 60
 const FX = { speed: 1, magnet: 2, shield: 4, paused: 8, ghost: 16, bounty: 32 }
 
 // Les événements : le premier après tant, puis entre deux.
-const EVENT_FIRST = [60, 120]
-const EVENT_EVERY = [120, 240]
+const EVENT_FIRST = [20, 40]
+const EVENT_EVERY = [30, 60]
 const RAIN_TIME = 20
 const RAIN_RATE = 25
 const RAIN_MAX = 400
