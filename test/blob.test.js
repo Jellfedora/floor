@@ -98,12 +98,13 @@ test('les bonus : vitesse, aimant, bouclier', { timeout: 15000 }, () => {
 
 test('les événements : pluie dorée, boss, Ronnie', { timeout: 15000 }, () => {
   const world = new World({ random: seeded(5) })
+  world.nextEvent = Infinity
   world.start('rain')
   for (let k = 0; k < 40 * 5; k++) world.step(1 / 40)
   assert.ok(world.pellets.filter((g) => g.hue === GOLD).length > 50)
-  assert.equal(world.event.kind, 'rain')
+  assert.ok(world.on('rain'))
   for (let k = 0; k < 40 * 16; k++) world.step(1 / 40)
-  assert.equal(world.event, null)
+  assert.equal(world.on('rain'), null)
   assert.deepEqual(world.drain().filter((n) => n.t === 'event').map((n) => [n.kind, n.on]), [['rain', true], ['rain', false]])
 
   world.start('boss')
@@ -199,8 +200,9 @@ test('la zone se resserre, le trou noir avale, le fantôme passe, la mine fait �
   for (const p of [...world.players.values()]) world.leave(p.id)
   world.bots = true
   world.viruses = []
+  world.nextEvent = Infinity
   world.start('zone')
-  Object.assign(world.event, { x: 2000, y: 2000 })
+  Object.assign(world.on('zone'), { x: 2000, y: 2000 })
   const out = world.join('Dio')
   const ghost = world.join('Ozzy')
   Object.assign(out.cells[0], { x: 100, y: 100, m: 500 })
@@ -208,21 +210,24 @@ test('la zone se resserre, le trou noir avale, le fantôme passe, la mine fait �
   ghost.fx.ghost = 100
   for (const p of [out, ghost]) p.target = { x: p.cells[0].x, y: p.cells[0].y }
   for (let k = 0; k < 40 * 46; k++) world.step(1 / 40)
-  assert.ok(Math.abs(world.event.r - 650) < 1)
+  assert.ok(Math.abs(world.on('zone').r - 650) < 1)
   assert.ok(mass(out) < 100, 'fondu dehors')
   assert.ok(mass(ghost) > 400, 'le fantôme ne fond pas')
-  world.endEvent()
+  world.endEvent(world.on('zone'))
+  world.nextEvent = Infinity
 
   world.start('hole')
-  Object.assign(world.event, { x: 2000, y: 2000 })
+  Object.assign(world.on('hole'), { x: 2000, y: 2000 })
   const small = world.join('Rob')
   Object.assign(small.cells[0], { x: 2300, y: 2000, m: 50 })
   small.target = { x: 2300, y: 2000 }
   const deaths = []
-  for (let k = 0; k < 40 * 10 && !deaths.length; k++) deaths.push(...world.step(1 / 40))
-  assert.equal(deaths[0]?.player, small, 'avalé')
-  assert.equal(deaths[0].by, 'hole')
-  world.endEvent()
+  for (let k = 0; k < 40 * 10 && !deaths.some((d) => d.player === small); k++) deaths.push(...world.step(1 / 40))
+  const swallowed = deaths.find((d) => d.player === small)
+  assert.ok(swallowed, 'avalé')
+  assert.equal(swallowed.by, 'hole')
+  world.endEvent(world.on('hole'))
+  world.nextEvent = Infinity
 
   // La mine : posée derrière, sans effet sur qui l'a posée, elle fait éclater le suivant.
   ghost.fx.ghost = 0
@@ -293,9 +298,27 @@ test('en ligne : sans pseudo refusé ; avec, il entre et voit le monde', { timeo
   assert.deepEqual(welcome.skins.filter(([, , , ok]) => ok).map(([id]) => id), ['plain'])
   const first = await dio.next('records')
   assert.deepEqual([first.l, first.me], [[], null])
-  // En spectateur d'abord.
+  // En spectateur d'abord : il suit le premier du classement, ou qui il veut, ou voit tout le monde.
   const watching = await dio.next('s')
   assert.equal(watching.me, null)
+  assert.ok(game.world.players.has(watching.fo))
+  // Quelques images au plus, le temps que floor lise le message.
+  const until = async (ok) => {
+    for (let k = 0; k < 20; k++) {
+      const f = await dio.next('s')
+      if (ok(f)) return f
+    }
+    assert.fail('pas vu')
+  }
+  const other = game.world.leaders(3)[2].id
+  dio.say({ t: 'watch', id: other })
+  await until((f) => f.fo === other)
+  dio.say({ t: 'watch', by: 1 })
+  await until((f) => f.fo !== other && f.fo !== null)
+  dio.say({ t: 'watch', id: 'map' })
+  assert.ok((await until((f) => f.fo === null)).h > 3000)
+  dio.say({ t: 'watch', id: null })
+  await until((f) => f.fo !== null)
   // Un skin pas encore débloqué : l'uni.
   dio.say({ t: 'join', skin: 'skull' })
   const { id } = await dio.next('joined')
@@ -315,6 +338,9 @@ test('en ligne : sans pseudo refusé ; avec, il entre et voit le monde', { timeo
   // Ceux d'avant son entrée ne le comptent pas encore.
   let board
   do board = await dio.next('board'); while (!board.me)
+  // Les ids, pour suivre un joueur du classement.
+  assert.equal(board.ids.length, board.l.length)
+  assert.equal(board.ids[board.l.findIndex(([, , me]) => me)], id)
   assert.equal(board.playing, 1)
   // Tout le classement, pas seulement les dix premiers : lui compris, avec les bots.
   assert.ok(board.l.length > 10, `${board.l.length} lignes`)
@@ -458,10 +484,11 @@ test('le rush : tout le monde va plus vite, 30 s', () => {
   }
   const calm = run()
   world.start('rush')
-  assert.equal(world.event.until - world.time, 30)
+  assert.equal(world.on('rush').until - world.time, 30)
   const rushed = run()
   assert.ok(rushed > calm * 1.5, `${calm} puis ${rushed}`)
-  world.endEvent()
+  world.endEvent(world.on('rush'))
+  world.nextEvent = Infinity
 })
 
 test('le festin, la colline, les météorites', () => {
@@ -476,11 +503,12 @@ test('le festin, la colline, les météorites', () => {
   world.pellets = [{ id: 1, x: 1000, y: 1000, hue: 0, m: 2, vx: 0, vy: 0, ejected: false, gold: false }]
   world.eatPellets()
   assert.equal(dio.cells[0].m, 56)
-  world.endEvent()
+  world.endEvent(world.on('feast'))
+  world.nextEvent = Infinity
 
   // La colline : dedans on grossit, dehors non.
   world.start('hill')
-  Object.assign(world.event, { x: 2000, y: 2000 })
+  Object.assign(world.on('hill'), { x: 2000, y: 2000 })
   const out = world.join('Ozzy')
   Object.assign(dio.cells[0], { x: 2000, y: 2000, m: 50 })
   Object.assign(out.cells[0], { x: 500, y: 500, m: 50 })
@@ -488,15 +516,16 @@ test('le festin, la colline, les météorites', () => {
   for (let k = 0; k < 40 * 4; k++) world.hazards(1 / 40, [])
   assert.ok(Math.abs(dio.cells[0].m - 150) < 1, `${dio.cells[0].m}`)
   assert.equal(out.cells[0].m, 50)
-  world.endEvent()
+  world.endEvent(world.on('hill'))
+  world.nextEvent = Infinity
 
   // Les météorites : elles s'annoncent, puis font éclater ce qui est dessous ; le bouclier protège.
   world.start('meteors')
   Object.assign(dio.cells[0], { x: 2000, y: 2000, m: 300 })
   Object.assign(out.cells[0], { x: 2050, y: 2000, m: 300 })
   out.fx.shield = 100
-  world.event.next = Infinity
-  world.event.falling.push({ id: 1, x: 2000, y: 2000, r: 150, at: world.time + 2, hit: false })
+  world.on('meteors').next = Infinity
+  world.on('meteors').falling.push({ id: 1, x: 2000, y: 2000, r: 150, at: world.time + 2, hit: false })
   world.hazards(1 / 40, [])
   assert.equal(dio.cells.length, 1, 'pas encore')
   world.time += 2
@@ -505,10 +534,76 @@ test('le festin, la colline, les météorites', () => {
   assert.equal(out.cells.length, 1, 'le bouclier')
   world.time += 1
   world.hazards(1 / 40, [])
-  assert.equal(world.event.falling.length, 0)
+  assert.equal(world.on('meteors').falling.length, 0)
   // Elles tombent d'elles-mêmes.
-  world.event.next = world.time
+  world.on('meteors').next = world.time
   world.hazards(1 / 40, [])
-  assert.equal(world.event.falling.length, 1)
-  world.endEvent()
+  assert.equal(world.on('meteors').falling.length, 1)
+  world.endEvent(world.on('meteors'))
+  world.nextEvent = Infinity
+})
+
+test('les virus en folie, les portails', () => {
+  const world = new World({ random: seeded(21), bots: false })
+  world.bots = true
+  world.nextEvent = Infinity
+  for (const p of [...world.players.values()]) world.leave(p.id)
+  // Les virus en folie : ils bougent et se multiplient ; ceux en plus s'en vont à la fin.
+  const before = world.viruses.map((v) => [v.x, v.y])
+  const count = world.viruses.length
+  world.start('viruses')
+  for (let k = 0; k < 40 * 10; k++) {
+    world.time += 1 / 40
+    world.hazards(1 / 40, [])
+  }
+  assert.ok(world.viruses.slice(0, count).every((v, k) => Math.hypot(v.x - before[k][0], v.y - before[k][1]) > 1))
+  assert.ok(world.viruses.length > count, `${world.viruses.length} virus`)
+  assert.ok(world.viruses.every((v) => v.x >= 0 && v.x <= 4000 && v.y >= 0 && v.y <= 4000))
+  world.endEvent(world.on('viruses'))
+  assert.equal(world.viruses.length, count)
+  assert.ok(world.viruses.every((v) => v.vx === 0 && v.vy === 0))
+
+  // Les portails : entré dans l'un, il ressort par son jumeau, lancé là où il allait ; pas de retour aussitôt.
+  world.start('portals')
+  const gates = world.on('portals').gates
+  assert.equal(gates.length, 4)
+  assert.ok(Math.hypot(gates[0].x - gates[1].x, gates[0].y - gates[1].y) >= 1200)
+  const dio = world.join('Dio')
+  Object.assign(dio.cells[0], { x: gates[0].x, y: gates[0].y, m: 50 })
+  dio.target = { x: gates[0].x + 500, y: gates[0].y }
+  world.hazards(1 / 40, [])
+  const c = dio.cells[0]
+  assert.ok(Math.hypot(c.x - gates[1].x, c.y - gates[1].y) < 200, 'au jumeau')
+  assert.ok(c.bx > 0, 'lancé vers sa cible')
+  Object.assign(c, { x: gates[1].x, y: gates[1].y })
+  world.hazards(1 / 40, [])
+  assert.deepEqual([c.x, c.y], [gates[1].x, gates[1].y], 'pas tout de suite')
+})
+
+test('l’Envers : le Démogorgon fait éclater ce qu’il attrape, ne se mange pas, s’en va à la fin', () => {
+  const world = new World({ random: seeded(33), bots: false })
+  world.bots = true
+  world.nextEvent = Infinity
+  world.viruses = []
+  for (const p of [...world.players.values()]) world.leave(p.id)
+  world.start('upside')
+  const demo = [...world.players.values()].find((p) => p.special === 'demo')
+  assert.ok(demo)
+  const dio = world.join('Dio')
+  const big = world.join('Ozzy')
+  Object.assign(demo.cells[0], { x: 2000, y: 2000 })
+  Object.assign(dio.cells[0], { x: 2050, y: 2000, m: 200 })
+  // Bien plus gros que lui : il ne le mange pas pour autant.
+  Object.assign(big.cells[0], { x: 1950, y: 2000, m: 5000 })
+  big.fx.shield = 100
+  world.drain()
+  world.hazards(1 / 40, [])
+  assert.ok(dio.cells.length > 1, 'éclaté')
+  assert.ok(world.drain().some((n) => n.t === 'grab' && n.player === dio.id))
+  world.eatCells([])
+  assert.equal(demo.cells[0].m, 350)
+  // Pas au classement.
+  assert.ok(!world.leaders(Infinity).includes(demo))
+  world.endEvent(world.on('upside'))
+  assert.ok(![...world.players.values()].some((p) => p.special === 'demo'))
 })

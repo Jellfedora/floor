@@ -27,6 +27,8 @@ const PER_IP_MINUTE = 30
 // Ensuite { t: 'join', skin } pour entrer, { t: 'aim', x, y } (la souris, dans le monde),
 // { t: 'split' }, { t: 'eject' }, { t: 'mine' } (la pose derrière soi), { t: 'leave' } (pour regarder), { t: 'pause' } puis { t: 'resume' }
 // (la bulle attend, protégée, au plus PAUSE_MS : le joueur peut fermer la connexion et revenir),
+// { t: 'watch', id } (qui suivre en spectateur : l'id d'un joueur, null pour le premier du classement,
+// 'map' pour tout le monde) ou { t: 'watch', by: 1 | -1 } (le suivant ou le précédent du classement),
 // { t: 'ping', n } (floor répond { t: 'pong', n }, pour mesurer le délai), { t: 'say', text } (au chat :
 // floor l'envoie à tous, { t: 'chat', from, text }, lui compris).
 //
@@ -34,7 +36,7 @@ const PER_IP_MINUTE = 30
 // ({ t: 's' }, voir `frame`), le classement chaque seconde ({ t: 'board' }), le classement des
 // records ({ t: 'records' }) à l'arrivée et à chaque nouveau record, { t: 'dead' } quand il s'est
 // fait manger (expired : sa pause a trop duré), et au fil de la partie : les morts ({ t: 'kill' }), les événements ({ t: 'event' }),
-// ses bonus ({ t: 'bonus' }), son badge Ronnie ({ t: 'badge' }).
+// ses bonus ({ t: 'bonus' }), son badge Ronnie ({ t: 'badge' }), le Démogorgon qui l'attrape ({ t: 'grabbed' }).
 //
 // Tout vit en mémoire ; la plus grosse masse de chaque joueur va au classement `ronnie-io`. Quand
 // le dernier joueur s'en va, le monde s'arrête et repart de zéro avec le suivant.
@@ -160,16 +162,19 @@ function blob (server, db, players, { random, trustProxy = false, graceMs = GRAC
         // l : [nom, masse, le sien, un bot]... ; sa place quand il est en vie : [rang, masse].
         const rank = all.findIndex((p) => p.id === client.id)
         const me = rank >= 0 ? [rank + 1, Math.round(mass(all[rank]))] : null
-        send(client, { t: 'board', l: leaders.map((p) => [p.name, Math.round(mass(p)), p.id === client.id, p.bot]), me, playing: humans, online: watching })
+        send(client, { t: 'board', l: leaders.map((p) => [p.name, Math.round(mass(p)), p.id === client.id, p.bot]), ids: leaders.map((p) => p.id), me, playing: humans, online: watching })
       }
     }
   }
 
   // Ce qui s'est passé : les morts et les événements pour tout le monde, un bonus pour qui l'a pris,
-  // le badge pour qui a mangé Ronnie.
+  // le badge pour qui a mangé Ronnie, le Démogorgon à qui il a attrapé.
   function announce (news) {
     if (news.t === 'kill' || news.t === 'event') {
       for (const c of ready()) send(c, news)
+    } else if (news.t === 'grab') {
+      const c = clientOf(news.player)
+      if (c) send(c, { t: 'grabbed' })
     } else if (news.t === 'bonus') {
       const c = clientOf(news.player)
       if (c) send(c, { t: 'bonus', kind: news.kind })
@@ -197,10 +202,11 @@ function blob (server, db, players, { random, trustProxy = false, graceMs = GRAC
   // et celles parties (gx : id...) ; la masse éjectée (e : x, y, couleur...), les virus (v : x, y...),
   // les bonus (b : x, y, sorte...), les mines (m : x, y, couleur...) ; les joueurs pas encore vus
   // (n : id → [nom, couleur, skin]) ; ses effets (fx : secondes restantes de vitesse, aimant,
-  // bouclier ; fy : de fantôme, et ses mines) ; l'événement (ev : sorte, secondes), la zone
-  // (z : x, y, rayon), le trou noir (bh : x, y).
+  // bouclier ; fy : de fantôme, et ses mines) ; les événements en cours (es : [sorte, secondes]... ;
+  // ev : le premier), la zone (z : x, y, rayon), le trou noir (bh : x, y), les portails (pt : x, y...,
+  // deux par deux) ; qui suit le spectateur (fo).
   function frame (client) {
-    const v = world.view(client.id, client.aspect)
+    const v = world.view(client.id, client.aspect, client.watch ?? null)
     const c = []
     const n = {}
     for (const { c: cell, p } of v.cells) {
@@ -225,10 +231,14 @@ function blob (server, db, players, { random, trustProxy = false, graceMs = GRAC
     client.pellets = seen
     const me = client.id && world.players.get(client.id)
     const round = (s) => Math.round(s * 10) / 10
-    const ev = world.event
+    const events = world.live.map((ev) => [ev.kind, Math.ceil(ev.until - world.time)])
+    const zone = world.on('zone'); const hole = world.on('hole'); const meteors = world.on('meteors'); const hill = world.on('hill')
+    const portals = world.on('portals')
     return {
       t: 's',
       me: client.id,
+      // Qui le spectateur suit (null : tout le monde).
+      fo: client.id ? null : v.followed,
       x: Math.round(v.at.x),
       y: Math.round(v.at.y),
       h: Math.round(v.height),
@@ -242,12 +252,16 @@ function blob (server, db, players, { random, trustProxy = false, graceMs = GRAC
       n,
       fx: me ? [round(me.fx.speed), round(me.fx.magnet), round(me.fx.shield)] : null,
       fy: me ? [round(me.fx.ghost), me.mines] : null,
-      ev: ev ? [ev.kind, Math.ceil(ev.until - world.time)] : null,
-      z: ev?.kind === 'zone' ? [Math.round(ev.x), Math.round(ev.y), Math.round(ev.r)] : null,
-      bh: ev?.kind === 'hole' ? [Math.round(ev.x), Math.round(ev.y)] : null,
+      // Le premier des événements en cours (pour les Ronnie d'avant), et tous.
+      ev: events[0] ?? null,
+      es: events,
+      z: zone ? [Math.round(zone.x), Math.round(zone.y), Math.round(zone.r)] : null,
+      bh: hole ? [Math.round(hole.x), Math.round(hole.y)] : null,
       // Les météorites : x, y, rayon, dixièmes de seconde avant l'impact (négatif : tombée).
-      mt: ev?.kind === 'meteors' ? ev.falling.flatMap((m) => [Math.round(m.x), Math.round(m.y), Math.round(m.r), Math.round((m.at - world.time) * 10)]) : null,
-      hl: ev?.kind === 'hill' ? [Math.round(ev.x), Math.round(ev.y), HILL_R] : null
+      mt: meteors ? meteors.falling.flatMap((m) => [Math.round(m.x), Math.round(m.y), Math.round(m.r), Math.round((m.at - world.time) * 10)]) : null,
+      hl: hill ? [Math.round(hill.x), Math.round(hill.y), HILL_R] : null,
+      // Les portails : x, y... deux par deux (chacun mène à son jumeau).
+      pt: portals ? portals.gates.flatMap((g) => [Math.round(g.x), Math.round(g.y)]) : null
     }
   }
 
@@ -325,6 +339,9 @@ function blob (server, db, players, { random, trustProxy = false, graceMs = GRAC
         case 'leave':
           out(client)
           break
+        case 'watch':
+          watch(client, msg)
+          break
         case 'ping':
           send(client, { t: 'pong', n: msg.n })
           break
@@ -353,6 +370,19 @@ function blob (server, db, players, { random, trustProxy = false, graceMs = GRAC
     })
     ws.on('error', () => {})
   })
+
+  // Qui le spectateur suit (voir `frame`) : un joueur, le suivant du classement, ou tout le monde.
+  function watch (client, msg) {
+    if (msg.by === 1 || msg.by === -1) {
+      const all = world.leaders(Infinity)
+      if (!all.length) return
+      const now = world.players.get(client.watch)?.cells.length ? client.watch : all[0].id
+      const k = all.findIndex((p) => p.id === now)
+      client.watch = all[(k + msg.by + all.length) % all.length].id
+    } else if (msg.id === 'map' || msg.id === null || Number.isInteger(msg.id)) {
+      client.watch = msg.id
+    }
+  }
 
   function hello (client, msg) {
     const account = players.fromToken(msg.token)
