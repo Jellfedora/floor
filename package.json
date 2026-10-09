@@ -1,6 +1,6 @@
 {
   "name": "floor",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "API des jeux de Ronnie : joueurs, meilleurs scores (et plus tard, parties multijoueur)",
   "private": true,
   "main": "src/index.js",
