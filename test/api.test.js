@@ -79,3 +79,11 @@ test('un pseudo n’appartient qu’à un joueur', async () => {
   await call('PATCH', '/v1/players/me', { token: a.token, body: { name: 'Ian' } })
   assert.equal((await call('POST', '/v1/players', { body: { name: 'Lemmy' } })).status, 201)
 })
+
+test('/health dit quelle version tourne', async () => {
+  const { body } = await call('GET', '/health')
+  assert.equal(body.ok, true)
+  assert.equal(body.version, require('../package.json').version)
+  assert.match(body.commit, /^[0-9a-f]{7,}$/)
+  assert.ok(!Number.isNaN(Date.parse(body.started)))
+})

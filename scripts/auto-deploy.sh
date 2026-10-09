@@ -16,10 +16,16 @@ deploy () {
   [ "$from" = "$to" ] && return 0
   echo "$(date '+%F %T') $from -> $to : $(git log -1 --format=%s origin/main)"
   git reset -q --hard origin/main
-  docker compose up -d --build --quiet-pull 2>&1 | tail -3
-  # Vérifié : floor répond.
+  # Le commit et sa date, que /health donnera.
+  FLOOR_COMMIT=$to FLOOR_COMMIT_DATE=$(git log -1 --format=%cI) docker compose up -d --build --quiet-pull 2>&1 | tail -3
+  # Vérifié : floor répond, avec ce commit.
   sleep 5
-  if curl -fsS -m 5 http://127.0.0.1:5002/health >/dev/null; then echo "  ok"; else echo "  floor ne répond pas"; fi
+  health=$(curl -fsS -m 5 http://127.0.0.1:5002/health || true)
+  case $health in
+    *"\"commit\":\"$to\""*) echo "  ok" ;;
+    "") echo "  floor ne répond pas" ;;
+    *) echo "  floor répond, mais pas avec $to : $health" ;;
+  esac
 }
 
 deploy

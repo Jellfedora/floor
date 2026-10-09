@@ -55,7 +55,7 @@ git fetch -q origin main && git reset -q --hard origin/main && git branch -q -M 
 (crontab -l 2>/dev/null; echo '*/5 * * * * $HOME/floor/scripts/auto-deploy.sh >> $HOME/floor-deploy.log 2>&1') | crontab -
 ```
 
-Vérifier : `curl https://fedoheim.hopto.org/floor/health` doit répondre `{"ok":true}`.
+Vérifier : `curl https://fedoheim.hopto.org/floor/health` doit répondre `{"ok":true, …}` avec la version déployée : `version` (celle de package.json), `commit` (le commit court de main), `date` (celle du commit) et `started` (le démarrage du conteneur). Le `commit` doit être celui de `git rev-parse --short origin/main`.
 
 ## API
 

@@ -1,6 +1,10 @@
 services:
   floor:
-    build: .
+    build:
+      context: .
+      args:
+        FLOOR_COMMIT: ${FLOOR_COMMIT:-}
+        FLOOR_COMMIT_DATE: ${FLOOR_COMMIT_DATE:-}
     container_name: floor
     restart: unless-stopped
     ports:

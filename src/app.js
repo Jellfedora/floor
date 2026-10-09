@@ -3,6 +3,7 @@ const { players: makePlayers, HttpError } = require('./players')
 const { rateLimit } = require('./ratelimit')
 const games = require('./games')
 const { live } = require('./live')
+const release = require('./version')
 
 const BOARD_MAX = 100
 
@@ -15,7 +16,8 @@ function createApp (db, { trustProxy = false, now } = {}) {
   app.disable('x-powered-by')
   app.use(express.json({ limit: '16kb' }))
 
-  app.get('/health', (req, res) => res.json({ ok: true }))
+  // Répond, et dit quelle version tourne (pour vérifier qu'un déploiement est passé).
+  app.get('/health', (req, res) => res.json({ ok: true, ...release }))
 
   // Joueurs.
   app.post('/v1/players', rateLimit(20, 60 * 60 * 1000), (req, res) => {
