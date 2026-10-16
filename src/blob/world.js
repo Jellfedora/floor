@@ -591,12 +591,13 @@ class World {
     return gates
   }
 
-  // Où tombe une météorite : souvent près d'un joueur en vie (pas les bots), sinon n'importe où.
+  // Où tombe une météorite : surtout n'importe où ; de temps en temps près d'un joueur en vie, bots compris
+  // (avant, 6 sur 10 visaient un humain : seul en ligne, presque toutes tombaient sur soi).
   meteorSpot () {
-    const humans = [...this.players.values()].filter((p) => !p.bot && !p.paused && p.cells.length)
-    const at = humans.length && this.random() < 0.6 ? center(humans[Math.floor(this.random() * humans.length)]) : null
-    const x = at ? at.x + this.between(-350, 350) : this.between(150, SIZE - 150)
-    const y = at ? at.y + this.between(-350, 350) : this.between(150, SIZE - 150)
+    const alive = [...this.players.values()].filter((p) => !p.paused && p.cells.length)
+    const at = alive.length && this.random() < 0.2 ? center(alive[Math.floor(this.random() * alive.length)]) : null
+    const x = at ? at.x + this.between(-500, 500) : this.between(150, SIZE - 150)
+    const y = at ? at.y + this.between(-500, 500) : this.between(150, SIZE - 150)
     return { x: Math.min(Math.max(x, 0), SIZE), y: Math.min(Math.max(y, 0), SIZE) }
   }
 
