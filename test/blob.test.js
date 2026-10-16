@@ -541,6 +541,35 @@ test('le festin, la colline, les météorites', () => {
   assert.equal(world.on('meteors').falling.length, 1)
   world.endEvent(world.on('meteors'))
   world.nextEvent = Infinity
+
+  // L'acide : rien avant qu'il coule ; puis ce qui est dehors se dissout, ce qui est à l'abri reste.
+  world.start('acid')
+  const acid = world.on('acid')
+  assert.equal(acid.shelters.length, 4)
+  acid.shelters = [{ x: 2000, y: 2000 }]
+  dio.cells = [dio.cells[0]]
+  Object.assign(dio.cells[0], { x: 2050, y: 2000, m: 300 })
+  out.cells = [out.cells[0]]
+  Object.assign(out.cells[0], { x: 500, y: 500, m: 300 })
+  out.fx.shield = 0
+  const split = world.join('Lemmy')
+  split.cells = [{ ...dio.cells[0], id: 9001, x: 2000, y: 2100, m: 100 }, { ...dio.cells[0], id: 9002, x: 3000, y: 3000, m: 100 }]
+  const deaths = []
+  world.hazards(1 / 40, deaths)
+  assert.equal(out.cells.length, 1, 'pas encore')
+  world.time = acid.flood
+  world.hazards(1 / 40, deaths)
+  assert.equal(dio.cells.length, 1, 'à l\'abri')
+  assert.equal(out.cells.length, 0, 'dissous')
+  assert.deepEqual(split.cells.map((c) => c.id), [9001], 'la moitié dehors seulement')
+  assert.deepEqual(deaths.map((d) => [d.player.name, d.by]), [['Ozzy', 'acid']])
+  // Les bots filent à l'abri quand il est temps.
+  const bot = world.join('Robot', { bot: true })
+  bot.cells = [{ ...bot.cells[0], x: 2600, y: 2000, m: 50 }]
+  world.thinkBot(bot)
+  assert.ok(Math.hypot(bot.target.x - 2000, bot.target.y - 2000) < 280, JSON.stringify(bot.target))
+  world.endEvent(acid)
+  world.nextEvent = Infinity
 })
 
 test('les virus en folie, les portails', () => {

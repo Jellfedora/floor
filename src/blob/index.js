@@ -1,5 +1,5 @@
 const { WebSocketServer } = require('ws')
-const { World, SIZE, HILL_R, mass, fxBits, skinsOf } = require('./world')
+const { World, SIZE, HILL_R, ACID_R, mass, fxBits, skinsOf } = require('./world')
 const { clean } = require('../chat')
 
 // Le monde avance tant de fois par seconde, et les joueurs le voient une fois sur deux.
@@ -233,7 +233,7 @@ function blob (server, db, players, { random, trustProxy = false, graceMs = GRAC
     const round = (s) => Math.round(s * 10) / 10
     const events = world.live.map((ev) => [ev.kind, Math.ceil(ev.until - world.time)])
     const zone = world.on('zone'); const hole = world.on('hole'); const meteors = world.on('meteors'); const hill = world.on('hill')
-    const portals = world.on('portals')
+    const portals = world.on('portals'); const acid = world.on('acid')
     return {
       t: 's',
       me: client.id,
@@ -262,7 +262,10 @@ function blob (server, db, players, { random, trustProxy = false, graceMs = GRAC
       mt: meteors ? meteors.falling.flatMap((m) => [Math.round(m.x), Math.round(m.y), Math.round(m.r), Math.round((m.at - world.time) * 10)]) : null,
       hl: hill ? [Math.round(hill.x), Math.round(hill.y), HILL_R] : null,
       // Les portails : x, y... deux par deux (chacun mène à son jumeau).
-      pt: portals ? portals.gates.flatMap((g) => [Math.round(g.x), Math.round(g.y)]) : null
+      pt: portals ? portals.gates.flatMap((g) => [Math.round(g.x), Math.round(g.y)]) : null,
+      // L'acide : dixièmes de seconde avant qu'il coule (négatif : il coule), le rayon des abris, puis
+      // leurs x, y.
+      ac: acid ? [Math.round((acid.flood - world.time) * 10), ACID_R, ...acid.shelters.flatMap((s) => [Math.round(s.x), Math.round(s.y)])] : null
     }
   }
 

@@ -3,7 +3,7 @@
 // monde, que floor fait tourner pour tous (voir index.js) ; des bots le peuplent quand il y a peu de
 // joueurs. Des bonus traînent (vitesse, aimant, bouclier, fantôme, mine), des événements passent (une pluie de
 // granules dorées, un boss, la zone, le trou noir, le rush, la nuit, les météorites, la colline, le festin,
-// les virus en folie, les portails, l'Envers et son Démogorgon),
+// les virus en folie, les portails, l'Envers et son Démogorgon, l'acide et ses abris),
 // et Ronnie, rose, apparaît parfois : qui le mange gagne son skin.
 // Les distances sont en unités du monde, les temps en secondes.
 
@@ -111,6 +111,12 @@ const METEOR_AFTER = 0.6
 const HILL_TIME = 45
 const HILL_R = 420
 const HILL_GAIN = 25
+// L'acide : des abris apparaissent, un par quart de la carte ; ACID_WARN plus tard l'acide recouvre
+// tout le reste pendant ACID_FLOOD, et ce qui n'est pas à l'abri (le centre dans un abri) se dissout.
+const ACID_WARN = 18
+const ACID_FLOOD = 4
+const ACID_SHELTERS = 4
+const ACID_R = 280
 // Le festin : les granules ordinaires valent tant de fois plus.
 const FEAST_TIME = 30
 const FEAST = 3
@@ -139,9 +145,10 @@ const DEMO_REACH = 1800
 const DEMO_REST = 2.5
 const DEMO_AGAIN = 4
 const DEMO_CROWD = 3
-const EVENTS = ['rain', 'boss', 'zone', 'hole', 'rush', 'night', 'meteors', 'hill', 'feast', 'viruses', 'portals', 'upside']
-// Ceux qui ne vont pas ensemble : la colline pourrait être hors de la zone, le trou noir l'avaler.
-const APART = [['zone', 'hill'], ['hole', 'hill'], ['zone', 'hole'], ['upside', 'night'], ['upside', 'boss']]
+const EVENTS = ['rain', 'boss', 'zone', 'hole', 'rush', 'night', 'meteors', 'hill', 'feast', 'viruses', 'portals', 'upside', 'acid']
+// Ceux qui ne vont pas ensemble : la colline pourrait être hors de la zone, le trou noir l'avaler ; les
+// abris, hors de la zone, sous le trou noir, ou introuvables dans la nuit.
+const APART = [['zone', 'hill'], ['hole', 'hill'], ['zone', 'hole'], ['upside', 'night'], ['upside', 'boss'], ['acid', 'zone'], ['acid', 'hole'], ['acid', 'night']]
 // Ronnie : rare, rapide, il fuit tout le monde.
 const RONNIE_EVERY = [180, 420]
 const RONNIE_CHANCE = 0.6
@@ -203,7 +210,7 @@ class World {
     // Les événements en cours (deux au plus), le plus ancien en premier : { kind, until } (voir EVENTS) ;
     // la zone a aussi son centre, son rayon de départ et le rayon actuel (x, y, from, r), le trou noir
     // et la colline leur centre, les météorites celles qui vont tomber ({ id, x, y, r, at }) et quand
-    // vient la suivante.
+    // vient la suivante, l'acide ses abris ({ x, y }) et quand il coule (flood).
     this.live = []
     // Les derniers commencés, pour ne pas les revoir tout de suite.
     this.recent = []
@@ -452,11 +459,12 @@ class World {
     return Math.min(Math.max(BOT_FULL, top * BOT_ABOVE), BOT_FULL_MAX)
   }
 
-  // Un joueur mangé par ce qui n'est pas un joueur (le trou noir) : sa mort, au fil si c'est un joueur.
+  // Un joueur mangé par ce qui n'est pas un joueur (le trou noir, l'acide) : sa mort, au fil si c'est un
+  // joueur.
   die (p, by, deaths) {
     p.cells = []
     deaths.push({ player: p, by, best: Math.round(p.best), kills: p.kills, time: this.time - p.born })
-    if (!p.bot || p.special) this.news.push({ t: 'kill', by: [by, 0], victim: [p.name, p.id], special: p.special ?? 'hole' })
+    if (!p.bot || p.special) this.news.push({ t: 'kill', by: [by, 0], victim: [p.name, p.id], special: p.special ?? by })
     if (this.bounty?.player === p.id) this.endBounty()
   }
 
@@ -503,6 +511,13 @@ class World {
         }
       }
       ev.falling = ev.falling.filter((m) => this.time < m.at + METEOR_AFTER)
+    } else if (ev.kind === 'acid') {
+      if (this.time < ev.flood) return
+      for (const p of [...this.players.values()]) {
+        if (p.paused || p.special || !p.cells.length) continue
+        p.cells = p.cells.filter((c) => this.sheltered(ev, c))
+        if (!p.cells.length) this.die(p, 'acid', deaths)
+      }
     } else if (ev.kind === 'hill') {
       for (const p of this.players.values()) {
         if (p.paused) continue
@@ -569,6 +584,22 @@ class World {
         }
       }
     }
+  }
+
+  // Une cellule à l'abri de l'acide : son centre dans un des abris.
+  sheltered (ev, c) {
+    return ev.shelters.some((s) => Math.hypot(c.x - s.x, c.y - s.y) < ACID_R)
+  }
+
+  // Les abris de l'acide : un par quart de la carte, vers son milieu, pour qu'il y en ait un à portée de tous.
+  shelters () {
+    const shelters = []
+    for (let k = 0; k < ACID_SHELTERS; k++) {
+      const x = ((k % 2) + 0.5) * SIZE / 2 + this.between(-350, 350)
+      const y = (Math.floor(k / 2) % 2 + 0.5) * SIZE / 2 + this.between(-350, 350)
+      shelters.push({ x, y })
+    }
+    return shelters
   }
 
   // Un virus lancé dans une direction au hasard (les virus en folie).
@@ -928,6 +959,8 @@ class World {
       for (const v of this.viruses) this.launch(v)
     } else if (kind === 'portals') {
       this.live.push({ kind, until: this.time + PORTAL_TIME, gates: this.gates() })
+    } else if (kind === 'acid') {
+      this.live.push({ kind, until: this.time + ACID_WARN + ACID_FLOOD, flood: this.time + ACID_WARN, shelters: this.shelters() })
     } else if (kind === 'upside') {
       this.live.push({ kind, until: this.time + UPSIDE_TIME })
       this.join('Démogorgon', { bot: true, special: 'demo', startMass: DEMO_MASS, skin: 'demo' })
@@ -972,6 +1005,7 @@ class World {
     const reach = 500 + radius(main.m) * 4
     const hungry = p.special === 'boss' || (p.special !== 'ronnie' && mass(p) < this.full)
     const hole = this.on('hole'); const meteors = this.on('meteors'); const zone = this.on('zone'); const hill = this.on('hill')
+    const acid = this.on('acid')
     let fleeX = 0; let fleeY = 0
     const flee = (x, y, w) => {
       const d = Math.max(Math.hypot(at.x - x, at.y - y), 1)
@@ -994,6 +1028,19 @@ class World {
       const d = Math.hypot(zone.x - at.x, zone.y - at.y)
       if (d > zone.r - 150 - radius(main.m)) {
         p.target = { x: zone.x, y: zone.y }
+        return
+      }
+    }
+    // L'acide : un bot file vers l'abri le plus proche quand il est temps (le trajet, plus un peu de
+    // marge), et n'en sort plus ; d'ici là, il vit sa vie.
+    if (acid && !p.special) {
+      const shelter = acid.shelters.reduce((a, b) => (Math.hypot(b.x - at.x, b.y - at.y) < Math.hypot(a.x - at.x, a.y - at.y) ? b : a))
+      const d = Math.hypot(shelter.x - at.x, shelter.y - at.y)
+      const left = acid.flood - this.time
+      if (left < d / speed(main.m) + 4 || (d < ACID_R && left < 8)) {
+        const a = (p.id * 2.4) % (Math.PI * 2)
+        p.target = { x: shelter.x + Math.cos(a) * ACID_R * 0.4, y: shelter.y + Math.sin(a) * ACID_R * 0.4 }
+        p.think = Math.min(p.think, 0.5)
         return
       }
     }
@@ -1222,4 +1269,4 @@ function skinsOf ({ games = 0, kills = 0, best = 0, badges = [] } = {}) {
   })
 }
 
-module.exports = { World, SIZE, HILL_R, HUES, GOLD, START_MASS, VIRUS_MASS, MAX_CELLS, SKINS, BONUS, FX, KINDS, radius, mass, center, fxBits, skinsOf }
+module.exports = { World, SIZE, HILL_R, ACID_R, HUES, GOLD, START_MASS, VIRUS_MASS, MAX_CELLS, SKINS, BONUS, FX, KINDS, radius, mass, center, fxBits, skinsOf }
