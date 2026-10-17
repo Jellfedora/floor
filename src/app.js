@@ -4,6 +4,7 @@ const { rateLimit } = require('./ratelimit')
 const games = require('./games')
 const { live } = require('./live')
 const release = require('./version')
+const modules = require('./modules')
 
 const BOARD_MAX = 100
 
@@ -33,6 +34,9 @@ function createApp (db, { trustProxy = false, now } = {}) {
 
   // Le jeu à deux : présence, invitations, parties.
   app.use('/v1/live', live(db, players, { now }))
+
+  // Les modules que Ronnie propose de télécharger.
+  app.get('/v1/modules', (req, res) => res.json({ modules }))
 
   // Jeux.
   app.get('/v1/games', (req, res) => {

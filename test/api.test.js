@@ -87,3 +87,14 @@ test('/health dit quelle version tourne', async () => {
   assert.match(body.commit, /^[0-9a-f]{7,}$/)
   assert.ok(!Number.isNaN(Date.parse(body.started)))
 })
+
+test('donne le catalogue des modules de Ronnie', async () => {
+  const { status, body } = await call('GET', '/v1/modules')
+  assert.equal(status, 200)
+  const serj = body.modules.find((m) => m.id === 'serj')
+  assert.equal(serj.repo, 'Jellfedora/serj')
+  for (const m of body.modules) {
+    assert.match(m.id, /^[a-z0-9-]+$/)
+    assert.ok(m.name && m.description && m.repo && m.app && m.exe)
+  }
+})
