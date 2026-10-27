@@ -113,3 +113,16 @@ test('au démineur, le plus petit temps gagne', async () => {
   assert.equal(board.entries[0].details.clicks, 98)
   assert.equal((await call('GET', '/v1/games')).body.find((g) => g.id === 'demineur').order, 'asc')
 })
+
+test('à Ronnie Run, la plus longue course gagne', async () => {
+  const a = (await call('POST', '/v1/players', { body: { name: 'Rainbow' } })).body
+  const b = (await call('POST', '/v1/players', { body: { name: 'Elf' } })).body
+  assert.equal((await call('POST', '/v1/games/ronnie-run/scores', { token: a.token, body: { meters: 420, jumps: 37 } })).status, 201)
+  assert.equal((await call('POST', '/v1/games/ronnie-run/scores', { token: a.token, body: { meters: 300, jumps: 25 } })).body.record, false)
+  await call('POST', '/v1/games/ronnie-run/scores', { token: b.token, body: { meters: 666, jumps: 61 } })
+  assert.equal((await call('POST', '/v1/games/ronnie-run/scores', { token: b.token, body: { meters: 999999, jumps: 1 } })).status, 400)
+
+  const board = (await call('GET', '/v1/games/ronnie-run/leaderboard', { token: a.token })).body
+  assert.deepEqual(board.entries.map((e) => [e.rank, e.name, e.score, e.me]), [[1, 'Elf', 666, false], [2, 'Rainbow', 420, true]])
+  assert.equal(board.entries[0].details.jumps, 61)
+})
