@@ -98,3 +98,18 @@ test('donne le catalogue des modules de Ronnie', async () => {
     assert.ok(m.name && m.description && m.repo && m.app && m.exe)
   }
 })
+
+test('au démineur, le plus petit temps gagne', async () => {
+  const a = (await call('POST', '/v1/players', { body: { name: 'Sapper' } })).body
+  const b = (await call('POST', '/v1/players', { body: { name: 'Minus' } })).body
+  assert.equal((await call('POST', '/v1/games/demineur/scores', { token: a.token, body: { ms: 90000, clicks: 120 } })).status, 201)
+  assert.equal((await call('POST', '/v1/games/demineur/scores', { token: a.token, body: { ms: 95000, clicks: 100 } })).body.record, false)
+  assert.equal((await call('POST', '/v1/games/demineur/scores', { token: a.token, body: { ms: 61000, clicks: 98 } })).body.record, true)
+  await call('POST', '/v1/games/demineur/scores', { token: b.token, body: { ms: 75000, clicks: 110 } })
+  assert.equal((await call('POST', '/v1/games/demineur/scores', { token: b.token, body: { ms: 200, clicks: 3 } })).status, 400)
+
+  const board = (await call('GET', '/v1/games/demineur/leaderboard', { token: b.token })).body
+  assert.deepEqual(board.entries.map((e) => [e.rank, e.name, e.score, e.me]), [[1, 'Sapper', 61000, false], [2, 'Minus', 75000, true]])
+  assert.equal(board.entries[0].details.clicks, 98)
+  assert.equal((await call('GET', '/v1/games')).body.find((g) => g.id === 'demineur').order, 'asc')
+})
