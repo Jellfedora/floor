@@ -1,5 +1,5 @@
 const { WebSocketServer } = require('ws')
-const { World, VERSION, SIDE, TILE, RECIPES, BUILDS, FOODS, UPGRADES, QUALITY_MAX, BOSS } = require('./world')
+const { World, VERSION, SIDE, TILE, RECIPES, BUILDS, FOODS, UPGRADES, QUALITY_MAX, BOSS, CARRY, STACK, WEIGHT, stackOf } = require('./world')
 const { clean } = require('../chat')
 const { route } = require('../upgrade')
 
@@ -46,8 +46,9 @@ function pack (tiles) {
   }
   return out.join('')
 }
-const ROCK_KIND = { stone: 0, copper: 1 }
-const PIECE_KIND = { workbench: 0, floor: 1, wall: 2, door: 3, bed: 4, standingtorch: 5, smelter: 6, forge: 7, choppingblock: 8, tanningrack: 9, portal: 10, chest: 11, cauldron: 12 }
+const ROCK_KIND = { stone: 0, copper: 1, tin: 2 }
+const CROP_KIND = { carrot: 0, beechseeds: 1, birchseeds: 2, firecone: 3, pinecone: 4, raspberrybush: 5, blueberrybush: 6, mushroompatch: 7 }
+const PIECE_KIND = { workbench: 0, floor: 1, wall: 2, door: 3, bed: 4, standingtorch: 5, smelter: 6, forge: 7, choppingblock: 8, tanningrack: 9, portal: 10, chest: 11, cauldron: 12, rug: 13, bridge: 14, cookingstation: 15, fence: 16, palisade: 17 }
 // Ce que porte un joueur, en un nombre : le haut (3 bits : 1 haillons, 2 cuir, 3 troll, 4 bronze), le
 // bas (pareil, décalé de 3), le casque (2 bits : 1 cuir, 2 bronze, 3 troll ; décalé de 6), la cape (2
 // bits : 1 cerf, 2 troll ; décalé de 8), le bouclier (2 bits : 1 en bois, 2 grand, 3 en bronze ; décalé
@@ -66,8 +67,8 @@ const WORN = {
 // { t: 'gather', id } (un framboisier), { t: 'wear', k } (mettre ou enlever un vêtement), { t: 'offer' } (les
 // bois de cerf sur l'autel : Eikthyr arrive), { t: 'pos', x, y, d, m } (le jeu bouge le joueur lui-même et dit où il est ; d : 0 bas, 1 haut, 2 gauche,
 // 3 droite ; m : 0 immobile, 1 marche, 2 course), { t: 'hit', heavy } (un coup devant soi, avec ce qu'on tient ; lourd, ou dans la série),
-// { t: 'roll' } (la roulade : un instant où rien ne porte),
-// { t: 'shoot', a } (une flèche vers l'angle a), { t: 'pick', id }, { t: 'craft', r } (une recette),
+// { t: 'roll' } (la roulade : un instant où rien ne porte), { t: 'drown' } (à la nage, plus d'endurance), { t: 'jump', x, y } (sauter une falaise, en descendant),
+// { t: 'shoot', a, p } (une flèche vers l'angle a, l'arc bandé de p : 0 à 1), { t: 'pick', id }, { t: 'craft', r } (une recette),
 // { t: 'build', x, y } (un feu de camp), { t: 'place', k, x, y, r } (une construction, tournée de r, ou planter une carotte : k
 // 'carrot'), { t: 'unbuild', id } (la démonter), { t: 'use', id } (une porte, un lit, la fonderie, un portail), { t: 'name', id, name } (nommer un portail),
 // { t: 'board', id } et { t: 'land' } (monter dans un bateau, débarquer), { t: 'block', on } (lever ou baisser le bouclier),
@@ -107,6 +108,8 @@ function ronnheim (server, db, players, { random, trustProxy = false, seed = nul
   const world = new World({ seed: fresh ? state.seed : seed ?? Math.floor(Math.random() * 2 ** 31), random })
   world.restore(state)
   const packed = pack(world.tiles)
+  // Le relief, en chiffres (le palier, plus 8 pour une rampe : de 0 à 9 et au-delà), serré pareil.
+  const relief = pack(Array.from(world.relief, (v) => String.fromCharCode(48 + v)).join(''))
   const wss = new WebSocketServer({ noServer: true, maxPayload: 4096 })
   route(server, PATH, wss)
   const clients = new Set()
@@ -139,7 +142,7 @@ function ronnheim (server, db, players, { random, trustProxy = false, seed = nul
   // Une construction : id, sorte, case en haut à gauche, ouverte (une porte) ou allumée (la fonderie),
   // tournée (0 à 3, voir PIECES), le minerai qui attend d'être fondu (la fonderie).
   const pieceRow = (p) => [p.id, PIECE_KIND[p.kind], p.tx, p.ty, p.open || p.queue.length ? 1 : 0, p.rot, p.queue.length]
-  const cropRow = (c) => [c.id, c.tx, c.ty, c.stage]
+  const cropRow = (c) => [c.id, c.tx, c.ty, c.stage, CROP_KIND[c.kind]]
   // Un bateau : id, où, tourné vers (comme un joueur), quelqu'un à bord, un radeau (1) ou un drakkar.
   const boatRow = (b) => [b.id, r(b.x), r(b.y), b.d, b.rider ? 1 : 0, b.kind === 'raft' ? 1 : 0]
   // Une tombe : id, où ; le nom de qui y a laissé ses affaires, à part (id → nom).
@@ -159,7 +162,7 @@ function ronnheim (server, db, players, { random, trustProxy = false, seed = nul
     const p = world.players.get(client.id)
     if (!p) return
     const food = p.food.map((f) => [f.kind, r(f.until - world.time), FOODS[f.kind].time])
-    send(client, { t: 'me', inv: p.inv, held: p.held, worn: p.worn, hp: r(p.hp), maxHp: world.maxHp(p), maxStamina: world.maxStamina(p), armor: world.armor(p), food, alive: p.alive, order: p.order, bed: !!p.bed, quality: p.quality, boat: p.boat })
+    send(client, { t: 'me', inv: p.inv, held: p.held, worn: p.worn, hp: r(p.hp), maxHp: world.maxHp(p), maxStamina: world.maxStamina(p), armor: world.armor(p), food, alive: p.alive, order: p.order, bed: !!p.bed, bedAt: p.bed ? [r(p.bed.x), r(p.bed.y)] : null, quality: p.quality, boat: p.boat })
   }
 
   function tick () {
@@ -175,6 +178,8 @@ function ronnheim (server, db, players, { random, trustProxy = false, seed = nul
       const msg = {
         t: 'o',
         trees: changes.trees.flatMap((x) => [x.id, x.stump ? 1 : 0]),
+        // Les arbres nés d'une graine (tout entiers : le jeu ne les connaît pas encore).
+        grown: changes.grown.flatMap(treeRow),
         rocks: changes.rocks.flatMap((x) => [x.id, x.gone ? 1 : 0]),
         bushes: changes.bushes.flatMap((x) => [x.id, x.ripe ? 1 : 0]),
         items: changes.items.flatMap(itemRow),
@@ -270,10 +275,10 @@ function ronnheim (server, db, players, { random, trustProxy = false, seed = nul
       const state = world.time < x.stun ? STUNNED : rush ?? (x.swing || (eikthyr && world.time - (x.stomp ?? -99) < 0.4) ? STOMP : world.time - (x.cast ?? -99) < 0.6 ? CAST : world.time - x.bit < 0.35 ? BITE : BEAST_STATE[x.state] ?? 0)
       b.push(x.id, BEAST_KIND[x.kind], r(x.x), r(x.y), x.d, state, r((x.hp / x.max) * 100), x.stars ?? 0, x.shield ? 1 : 0)
     }
-    const ar = world.arrows.filter(near).flatMap((a) => [r(a.x), r(a.y), r(a.vx), r(a.vy), a.spear ? 1 : 0])
+    const ar = world.arrows.filter(near).flatMap((a) => [r(a.x), r(a.y), r(a.vx), r(a.vy), a.spear ? 1 : a.stone ? 2 : 0])
     const boss = world.boss()
     const bt = world.bolts.flatMap((v) => [r(v.x), r(v.y), Math.max(0, r((v.at - world.time) * 10)), v.rock ? v.radius : BOSS.boltRadius, v.rock ? 1 : 0])
-    return { t: 's', p, n, b, ar, hp: self ? r(self.hp) : 0, boss: boss ? [r((boss.hp / boss.max) * 100), r(boss.x), r(boss.y)] : null, bt, clock: r(world.clock()), zz: [self?.asleep ? 1 : 0, ...world.sleepers()], rain: world.weather.rain ? 1 : 0, tm: Math.round(world.time * 100) / 100 }
+    return { t: 's', p, n, b, ar, hp: self ? r(self.hp) : 0, boss: boss ? [r((boss.hp / boss.max) * 100), r(boss.x), r(boss.y)] : null, bt, clock: r(world.clock()), mn: Math.round(world.moon() * 100), zz: [self?.asleep ? 1 : 0, ...world.sleepers()], rain: world.weather.rain ? 1 : 0, tm: Math.round(world.time * 100) / 100 }
   }
 
   function start () {
@@ -357,8 +362,20 @@ function ronnheim (server, db, players, { random, trustProxy = false, seed = nul
       case 'roll':
         world.roll(id)
         break
+      case 'drown':
+        world.drown(id)
+        break
+      case 'discard':
+        world.discard(id, msg.k)
+        break
+      case 'jump':
+        if (!world.jump(id, Number(msg.x), Number(msg.y))) {
+          const p = world.players.get(id)
+          if (p?.alive) send(client, { t: 'pos', x: r(p.x), y: r(p.y) })
+        }
+        break
       case 'shoot':
-        world.shoot(id, Number(msg.a))
+        world.shoot(id, Number(msg.a), msg.p === undefined ? 1 : Number(msg.p))
         break
       case 'pick':
         world.pick(id, msg.id)
@@ -505,6 +522,7 @@ function ronnheim (server, db, players, { random, trustProxy = false, seed = nul
       side: SIDE,
       tile: TILE,
       tiles: packed,
+      relief,
       seed: world.seed,
       spawn: world.spawn,
       x: r(p.x),
@@ -528,6 +546,11 @@ function ronnheim (server, db, players, { random, trustProxy = false, seed = nul
       recipes: RECIPES,
       builds: BUILDS,
       foods: FOODS,
+      // Le sac : la taille des piles (50 si rien n'est dit ; un pour ce qui se porte ou se tient), le
+      // poids de chaque chose (1 si rien n'est dit), ce qu'on porte au plus.
+      stacks: Object.fromEntries([...Object.keys(STACK), ...Object.keys(WEIGHT)].map((k) => [k, stackOf(k)])),
+      weights: WEIGHT,
+      carry: CARRY,
       // Ce qui s'améliore (la chose → la recette), jusqu'à quelle qualité.
       upgrades: Object.fromEntries(Object.entries(UPGRADES).map(([k, r]) => [k, r.id])),
       qualityMax: QUALITY_MAX,

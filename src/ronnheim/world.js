@@ -1,4 +1,4 @@
-// Ronnheim, un jeu de survie comme Valheim, vu de dessus : une île dont le cœur est une prairie,
+// Ronnheim, un jeu de survie vu de dessus : une île dont le cœur est une prairie,
 // entourée de la forêt noire. Dans la prairie on ramasse des branches, des pierres et du silex, cueille
 // framboises et champignons, coupe des arbres, chasse le cerf (qui fuit) et le sanglier (qui charge),
 // repousse les grisets (qui laissent de la résine), et invoque Eikthyr, le grand cerf, sur son autel.
@@ -16,15 +16,31 @@
 const dungeon = require('./crypt')
 
 const TILE = 16
-const SIDE = 1024
+const SIDE = 2048
 const SIZE = TILE * SIDE
-// Le monde : de la mer, et des îles semées au hasard. Celle du départ au milieu (la prairie, la forêt
-// noire autour) ; les autres, de tant à tant, de tel à tel rayon (en cases), séparées d'au moins
-// `channel` cases de mer (il faut un bateau).
-const ISLANDS = { home: 120, count: [20, 30], radius: [35, 150], channel: 10 }
+// Le monde : de la mer, et de grandes îles semées au hasard (qu'on ne traverse pas en un jour : des
+// avant-postes, des portails). Celle du départ au milieu ; les autres, de tant à tant, de tel à tel
+// rayon (en cases), séparées d'au moins `channel` cases de mer (trop pour la nager : il faut un bateau).
+const ISLANDS = { home: 280, count: [7, 12], radius: [150, 400], channel: 45 }
+// La prairie et la forêt noire se partagent chaque île par grandes taches, jusqu'au bord de l'eau ;
+// autour du départ, la prairie, sur tant de cases.
+const MEADOW_HOME = 70
+// L'eau peu profonde : tant de cases depuis la rive (on y patauge) ; au-delà, on nage.
+const SHALLOW = 2
+// Le relief (voir `landform`) : tant de paliers au plus, des collines de tant de cases, leur niveau de
+// la mer et leur raideur ; on remonte en tant de cases depuis l'eau ; un palier de moins de tant de
+// cases est raboté ; une rampe pour tant de cases d'un palier, pas plus près que tant d'une autre ; le
+// bit des rampes.
+const RELIEF = { levels: 3, hills: 140, sea: 0.4, steep: 2.4, falloff: 6, smallest: 150, pocket: 60, rampEvery: 1800, rampRoom: 24, ramp: 8 }
+// Les rivières : une pour tant de cases de rayon d'île, de telle à telle demi-largeur (en cases) ; elles
+// partent de l'intérieur et coulent jusqu'à la mer (il faut un pont, ou nager).
+const RIVERS = { per: 90, width: [2.5, 4.5] }
 // Ce que les comptes (arbres, bêtes, buissons, ce qui traîne par terre) visaient : la terre de la
 // première île. Ils suivent la terre qu'il y a (une île deux fois plus grande, deux fois plus d'arbres).
 const LAND_REF = 34000
+// Le chemin d'une bête en chasse, quand un mur la gêne : cherché à moins de tant de cases, en voyant
+// tant de cases au plus, refait toutes les tant de secondes (ou quand sa proie a bougé).
+const PATH = { reach: 48, nodes: 6000, every: 1 }
 // Une bête loin de tous les joueurs dort (elle ne pense plus) : au-delà de tant.
 const AWAKE = 1400
 
@@ -32,7 +48,7 @@ const AWAKE = 1400
 // tour), le sol de la forêt noire ; les murs et les dalles des cryptes.
 const T = { grass: '0', dark: '1', light: '2', path: '3', sand: '4', water: '5', deep: '6', forest: '7', cryptwall: '8', crypt: '9' }
 const CRYPT_TILES = new Set([T.cryptwall, T.crypt])
-// Les cryptes de la forêt noire (comme les chambres funéraires de Valheim) : un mausolée pour `per` cases
+// Les cryptes de la forêt noire : un mausolée pour `per` cases
 // de forêt noire ; son escalier descend dans un donjon à part (voir crypt.js), posé hors de l'île, à
 // partir de `band` (en x et en y), chacun à `stride` du suivant (assez pour qu'on ne s'y voie pas). Un
 // donjon où plus personne n'est (ni aucune tombe) depuis `reset` secondes se défait : il se refera,
@@ -73,7 +89,14 @@ const WALK = 70
 const RUN = 125
 // De la marge sur ce qu'un joueur peut parcourir entre deux positions (la latence, le hasard des paquets).
 const MOVE_SLACK = 1.6
-// La vie et l'endurance sans rien dans le ventre (comme dans Valheim) ; la nourriture les augmente (voir FOODS).
+// Un coup arrivé un peu avant la fin du précédent compte quand même (le réseau ne les porte pas tous
+// aussi vite) : le jeu attend déjà le temps de l'outil.
+const HIT_SLACK = 0.06
+// Un saut d'une falaise (en descendant) : tant de cases au plus.
+const JUMP = 3.2
+// La nage : le jeu tient l'endurance ; à bout, on perd tant de vie par seconde.
+const DROWN = 5
+// La vie et l'endurance sans rien dans le ventre ; la nourriture les augmente (voir FOODS).
 const BASE_HP = 25
 const BASE_STAMINA = 50
 // La santé revient de tant par seconde (plus tant par repas en cours), tant de secondes après le dernier coup.
@@ -93,9 +116,7 @@ const BENCH_RANGE = 160
 // Aucune bête n'apparaît à moins de tant d'un établi (la base est à l'abri des retours ; celles qui
 // passent peuvent toujours y entrer).
 const NO_SPAWN = 480
-// La portée d'un poste de travail (établi, forge, feu) pour y fabriquer.
-const STATION_REACH = 70
-// L'établi monte d'un niveau pour chaque extension posée à moins de tant de lui (comme dans Valheim) :
+// L'établi monte d'un niveau pour chaque extension posée à moins de tant de lui :
 // le billot, la table de tannage.
 const EXTENSIONS = ['choppingblock', 'tanningrack']
 const EXTENSION_RANGE = 80
@@ -106,6 +127,9 @@ const QUALITY_DMG = 0.3
 const QUALITY_ARMOR = 2
 // On se sert d'une construction (porte, lit, fonderie) d'aussi près que ça de son milieu.
 const USE_REACH = 56
+// D'une construction qui sert (un poste de travail, la fonderie, un coffre, une porte, un lit) : collé à
+// elle, à moins de tant de son bord.
+const TOUCH = 12
 
 // Ce qu'on tient en main : dégâts aux bêtes, coups pour abattre un arbre (chop) et la dureté qu'on
 // peut abattre (tier : 2 pour les bouleaux), coups pour casser un rocher (mine), temps entre deux
@@ -124,12 +148,12 @@ const TOOLS = {
   bronzepickaxe: { dmg: 14, mine: 2, every: 0.7, reach: 32 },
   bronzesword: { dmg: 28, every: 0.55, reach: 36 },
   bronzemace: { dmg: 26, every: 0.65, reach: 34, blunt: true },
-  bow: { dmg: 4, every: 0.5, reach: 28, arrow: 22, both: true },
+  bow: { dmg: 4, every: 0.5, reach: 28, arrow: 22, range: 170, both: true },
   // Le marteau (en main, on construit) et le cultivateur (en main, on retourne la terre et on plante) :
   // de piètres armes.
   hammer: { dmg: 5, every: 0.5, reach: 28, blunt: true },
   cultivator: { dmg: 3, every: 0.5, reach: 28 },
-  finebow: { dmg: 4, every: 0.5, reach: 28, arrow: 32, both: true }
+  finebow: { dmg: 4, every: 0.5, reach: 28, arrow: 32, range: 240, both: true }
 }
 // Le combat. Les coups s'enchaînent : un coup donné moins de `chain` secondes après que le précédent est
 // prêt continue la série, et le troisième (le coup final) fait `finisher` fois plus et repousse de
@@ -147,11 +171,13 @@ const SHIELDED = { share: 0.3, through: 0.2 }
 // Les flèches, de la meilleure à la moins bonne (l'arc tire la meilleure qu'on a) : les dégâts en plus.
 const AMMO = { flintarrow: 6, arrow: 0 }
 const ARROW_SPEED = 330
-const ARROW_RANGE = 280
+// La flèche d'un arc à peine bandé va moins loin et fait moins mal (de tant à tout, selon le bandage
+// que le jeu dit : bander use l'endurance).
+const DRAWN_MIN = 0.4
 const SHOOT_EVERY = 0.7
 
-// Ce qu'on porte : où, et l'armure que ça donne (comme dans Valheim). Les dégâts reçus baissent comme
-// dans Valheim. Du plus simple au plus solide : les haillons (le cuir du sanglier), le cuir (la peau du
+// Ce qu'on porte : où, et l'armure que ça donne. Les dégâts reçus baissent avec
+// l'armure (voir `absorb`). Du plus simple au plus solide : les haillons (le cuir du sanglier), le cuir (la peau du
 // cerf), la peau de troll, le bronze. Le bouclier se porte au bras (voir SHIELDS).
 const WEAR = {
   ragtunic: { slot: 'chest', armor: 1 },
@@ -207,7 +233,7 @@ const MEAL_AGAIN = 0.3
 
 // Les arbres : coups pour les abattre, la dureté (il faut une hache d'au moins ce tier), ce qu'ils
 // laissent ([sorte, combien, chance]...), quand ils repoussent.
-// Comme dans Valheim : le hêtre et le bouleau poussent dans la prairie, le sapin et le pin dans la
+// Le hêtre et le bouleau poussent dans la prairie, le sapin et le pin dans la
 // forêt noire (le pin donne le bois de cœur).
 const TREES = {
   beech: { hp: 6, tier: 1, loot: [['wood', 4, 1]] },
@@ -217,14 +243,17 @@ const TREES = {
 }
 // Une souche : tant de coups de hache pour l'arracher (l'arbre ne repousse pas).
 const STUMP_HP = 3
-// Les rochers et les gisements de cuivre : coups de pioche, ce qu'ils laissent, s'ils reviennent (le
-// cuivre, jamais).
+// Les rochers et les gisements de cuivre et d'étain : coups de pioche, ce qu'ils laissent, s'ils
+// reviennent (le minerai, jamais).
 const ROCKS = {
   stone: { hp: 8, loot: [['stone', 5], ['flint', 2]] },
-  copper: { hp: 12, loot: [['copperore', 4], ['stone', 2]], once: true }
+  copper: { hp: 12, loot: [['copperore', 4], ['stone', 2]], once: true },
+  tin: { hp: 10, loot: [['tinore', 3], ['stone', 1]], once: true }
 }
+// Les gisements d'étain : tant (à l'échelle de la terre), dans la forêt noire, à moins de tant de l'eau.
+const TIN = { count: 25, shore: 40 }
 const ROCK_BACK = 15 * 60
-// Les buissons : combien, ce qu'on y cueille, quand les fruits reviennent (comme Valheim : 3000 s).
+// Les buissons : combien, ce qu'on y cueille, quand les fruits reviennent (3000 s).
 const BUSHES = { raspberry: { count: 40, n: [2, 3] }, blueberry: { count: 50, n: [2, 4] } }
 const BUSH_BACK = 50 * 60
 // Le jour et la nuit : une minute du jeu dure une seconde, la journée 24 minutes ; l'aube à 6 h, la
@@ -235,9 +264,7 @@ const NIGHT = 12 * 60
 const RAIN = [120, 300]
 const DRY = [480, 1200]
 // Les choses qui traînent par terre, et combien la nature en remet (vérifié de temps en temps).
-const LITTER = { branch: 220, stone: 200, flint: 60, mushroom: 80, wildcarrot: 15, tinore: 40 }
-// Ce que la nature ne pose qu'une fois : ramassé, il ne revient pas.
-const ONCE = new Set(['tinore', 'surtlingcore'])
+const LITTER = { branch: 220, stone: 200, flint: 180, mushroom: 80, wildcarrot: 15 }
 const LITTER_EVERY = 30
 // Ce qu'on ramasse sous un autre nom.
 const PICKS_AS = { branch: 'wood', wildcarrot: 'carrot' }
@@ -249,13 +276,15 @@ const DROP_TIME = 10 * 60
 // elles lèvent le bras (`windup` secondes : on peut reculer, ou parer) puis le coup tombe. Les nains gris
 // chassent en bande (`pack` : ceux d'à côté suivent). `weak` : ce qui leur fait plus ou moins mal.
 const BEASTS = {
-  deer: { hp: 40, walk: 26, run: 135, loot: [['meat', 1, 2], ['hide', 1, 1], ['antler', 0, 1]], count: { meadow: 20 } },
-  boar: { hp: 50, walk: 22, run: 95, loot: [['meat', 1, 2], ['leather', 1, 2]], count: { meadow: 14 } },
+  deer: { hp: 40, walk: 26, run: 105, loot: [['meat', 1, 2], ['hide', 1, 1], ['antler', 0, 1]], count: { meadow: 20 } },
+  // Le sanglier blessé charge (`charge`, comme l'élan du nain gris : il gratte le sol, puis fonce tout
+  // droit), puis s'éloigne `back` secondes et revient à l'assaut.
+  boar: { hp: 50, walk: 22, run: 95, loot: [['meat', 1, 2], ['leather', 1, 2]], count: { meadow: 14 }, charge: { min: 30, max: 150, every: 3, windup: 0.5, time: 0.6, speed: 210, dmg: 13, back: 1.3 } },
   greyling: { hp: 20, walk: 24, run: 64, loot: [['resin', 1, 2]], count: { meadow: 8 }, hostile: { sight: 100, dmg: 6, every: 1.4, reach: 18, windup: 0.35 } },
-  // Le nain gris bondit sur sa proie d'un peu loin (`rush` : entre `min` et `max`, toutes les `every`
-  // secondes ; il se ramasse `windup` secondes, puis file tout droit `time` secondes à `speed`, et touche
-  // qui est sur son chemin).
-  greydwarf: { hp: 40, walk: 28, run: 88, loot: [['resin', 1, 2], ['stone', 0, 1], ['greydwarfeye', 0, 2]], count: { forest: 40 }, pack: 150, hostile: { sight: 140, dmg: 12, every: 1.3, reach: 20, windup: 0.4, rush: { min: 45, max: 100, every: 5, windup: 0.35, time: 0.35, speed: 230, dmg: 12 } } },
+  // Le nain gris jette des cailloux d'un peu loin (`throw` : entre `min` et `max`, à peu près toutes les
+  // `every` secondes ; il lève le bras `windup` secondes, le caillou vole à `speed` sur `range`), et
+  // frappe de près.
+  greydwarf: { hp: 40, walk: 28, run: 88, loot: [['resin', 1, 2], ['stone', 0, 1], ['greydwarfeye', 0, 2]], count: { forest: 40 }, pack: 150, hostile: { sight: 140, dmg: 12, every: 1.3, reach: 20, windup: 0.4, throw: { min: 35, max: 150, every: 3.5, windup: 0.45, speed: 170, range: 200, dmg: 8 } } },
   // Le squelette : il garde la forêt (quelques-uns rôdent dans la prairie), craint la massue, pas les flèches.
   skeleton: { hp: 40, walk: 26, run: 84, loot: [['bonefragments', 1, 3]], count: { forest: 12, meadow: 2 }, weak: { blunt: 2, pierce: 0.5 }, hostile: { sight: 140, dmg: 15, every: 1.5, reach: 22, windup: 0.45 } },
   // Le squelette archer (dans la forêt noire, autour des mausolées, dans les donjons) : il garde ses distances (recule sous `near`, tire sous `range`, ses
@@ -271,7 +300,7 @@ const BEASTS = {
   // Rare : tué, un autre ne revient pas avant une heure (`back`).
   troll: { hp: 300, walk: 16, run: 42, loot: [['trollhide', 3, 5], ['greydwarfeye', 1, 2]], count: { forest: 6 }, size: 1.8, back: 3600, hostile: { sight: 180, dmg: 50, every: 2.4, reach: 34, windup: 0.6, toss: { min: 70, max: 240, every: 9, windup: 0.8, delay: 2, radius: 28, dmg: 40 } }, smash: { radius: 30, trees: 42 } }
 }
-// Les bêtes à étoiles (comme dans Valheim) : une étoile, deux fois plus de vie et moitié plus de dégâts ;
+// Les bêtes à étoiles : une étoile, deux fois plus de vie et moitié plus de dégâts ;
 // deux étoiles, trois fois plus de vie et deux fois plus de dégâts ; leur butin d'autant. La chance d'en
 // croiser une (une étoile, deux) selon le pays ; la nuit, deux fois plus.
 const STARS = { hp: [1, 2, 3], dmg: [1, 1.5, 2], loot: [1, 2, 3], chance: { meadow: [0.06, 0.01], forest: [0.15, 0.04], mausoleum: [0.15, 0.04], crypt: [0.25, 0.08] } }
@@ -334,21 +363,35 @@ const PIECES = {
   tanningrack: { need: { wood: 10, flint: 20, leather: 10, hide: 2 }, w: 1, h: 1, bench: true },
   floor: { need: { wood: 1 }, w: 1, h: 1, flat: true, bench: true, rots: [0] },
   wall: { need: { wood: 2 }, w: 1, h: 1, bench: true, rots: [0] },
+  // La barrière (basse) et la palissade (des pieux taillés) : elles arrêtent les bêtes comme un mur,
+  // mais ne font pas un chez-soi.
+  fence: { need: { wood: 1 }, w: 1, h: 1, bench: true, rots: [0] },
+  palisade: { need: { wood: 4 }, w: 1, h: 1, bench: true, rots: [0, 1] },
   door: { need: { wood: 4 }, w: 1, h: 1, bench: true, rots: [0, 1] },
   bed: { need: { wood: 8, hide: 2 }, w: 2, h: 1, bench: true, rots: [0, 1, 2, 3] },
+  // Le tapis en peau de cerf : à plat, sur le sol ou sur un plancher (`cover`) ; il
+  // rend un chez-soi plus confortable (on y reste reposé plus longtemps).
+  rug: { need: { hide: 4 }, w: 2, h: 1, cover: true, bench: true, rots: [0, 1] },
+  // Le pont : des planches posées sur l'eau (`water`), par cases ; on y marche.
+  bridge: { need: { wood: 2 }, w: 1, h: 1, flat: true, water: true, bench: true, rots: [0, 1] },
   standingtorch: { need: { wood: 2, resin: 2 }, w: 1, h: 1, rots: [0] },
-  smelter: { need: { stone: 20, wood: 5 }, w: 2, h: 1, rots: [0, 1, 2, 3], bench: true },
+  smelter: { need: { stone: 20, wood: 5, surtlingcore: 5 }, w: 2, h: 1, rots: [0, 1, 2, 3], bench: true },
   forge: { need: { stone: 4, wood: 10, copper: 6 }, w: 2, h: 1, rots: [0, 1, 2, 3], bench: true },
   // Deux portails du même nom : on passe de l'un à l'autre.
   portal: { need: { finewood: 20, greydwarfeye: 10, surtlingcore: 2 }, w: 2, h: 1, rots: [0, 1, 2, 3], bench: true },
   chest: { need: { wood: 10 }, w: 1, h: 1, bench: true },
   // Le chaudron : sur un feu allumé (à moins de CAULDRON_FIRE), on y fait la soupe et la confiture.
-  cauldron: { need: { tin: 10 }, w: 1, h: 1, bench: true, rots: [0] }
+  cauldron: { need: { tin: 10 }, w: 1, h: 1, bench: true, rots: [0] },
+  // Le poste de cuisson : une broche posée sur un feu ; la viande cuit dessus, pas
+  // à même le feu.
+  cookingstation: { need: { wood: 2 }, w: 1, h: 1, bench: true, rots: [0] }
 }
 const CAULDRON_FIRE = 30
+// Ce qui se pose sur un feu (en visant le feu), un seul à la fois.
+const ON_FIRE = new Set(['cauldron', 'cookingstation'])
 for (const def of Object.values(PIECES)) def.rots ??= [0, 2]
 const PORTAL_NAME = 16
-// Les bateaux, comme dans Valheim : le radeau (du bois, du cuir, de la résine : lent, mais de quoi passer
+// Les bateaux : le radeau (du bois, du cuir, de la résine : lent, mais de quoi passer
 // d'une île à l'autre au début) et le drakkar (du bois fin et des clous en bronze : rapide). Posés sur
 // l'eau depuis la rive, près d'un établi. On y monte à tant de pixels ; deux bateaux pas plus près que
 // BOAT_ROOM.
@@ -361,6 +404,31 @@ const BOAT_REACH = 44
 const BOAT_ROOM = 34
 // La place qu'une pièce prend, tournée ainsi.
 const sized = (def, rot) => (rot % 2 ? { w: def.h, h: def.w } : { w: def.w, h: def.h })
+// Une carotte plantée pousse en tant de secondes (trois stades ; 4000 à 5000 s : un peu
+// plus de deux jours), et en donne tant.
+const GROW = 4500
+const HARVEST = 3
+// Ce qui se plante au cultivateur : ce qu'il faut, en combien de secondes ça pousse (trois stades), ce
+// que ça donne. La carotte va sur la terre retournée et s'arrache en se récoltant ; une graine d'arbre
+// devient un arbre (le hêtre et le bouleau dans la prairie, le sapin et le pin dans la forêt
+// noire) ; un buisson ou des champignons se récoltent, et repoussent (la moitié du temps).
+const BUSH_GROW = 2400
+const PLANTS = {
+  carrot: { need: { carrot: 1 }, grow: GROW, gives: ['carrot', HARVEST], tilled: true, once: true },
+  beechseeds: { need: { beechseeds: 1 }, grow: 2400, tree: 'beech', wild: false },
+  birchseeds: { need: { birchseeds: 1 }, grow: 2400, tree: 'birch', wild: false },
+  firecone: { need: { firecone: 1 }, grow: 2400, tree: 'fir', wild: true },
+  pinecone: { need: { pinecone: 1 }, grow: 2400, tree: 'pine', wild: true },
+  raspberrybush: { need: { raspberry: 10 }, grow: BUSH_GROW, gives: ['raspberry', 3] },
+  blueberrybush: { need: { blueberries: 10 }, grow: BUSH_GROW, gives: ['blueberries', 3] },
+  mushroompatch: { need: { mushroom: 10 }, grow: BUSH_GROW, gives: ['mushroom', 3] }
+}
+// La souche arrachée laisse parfois sa graine (tant de chances sur une).
+const SEEDS = { beech: 'beechseeds', birch: 'birchseeds', fir: 'firecone', pine: 'pinecone' }
+const SEED_CHANCE = 0.35
+// Une graine d'arbre veut de la place : pas d'arbre (ni de pousse) à moins de tant.
+const SAPLING_ROOM = 22
+
 // Ce que le menu de construction montre, dans l'ordre : le feu, les pièces, et planter une carotte.
 const BUILDS = [
   { id: 'fire', need: { stone: 5, wood: 2 } },
@@ -369,20 +437,15 @@ const BUILDS = [
   { id: 'boat', need: BOAT.need, bench: true, water: true },
   // Le cultivateur en main : retourner la terre (dans l'herbe ou la forêt), puis y planter.
   { id: 'till', need: {}, tool: 'cultivator' },
-  { id: 'carrot', need: { carrot: 1 }, tool: 'cultivator' }
+  ...Object.entries(PLANTS).map(([id, p]) => ({ id, need: p.need, tool: 'cultivator' }))
 ]
-// Une carotte plantée pousse en tant de secondes (trois stades ; comme Valheim, 4000 à 5000 s : un peu
-// plus de deux jours), et en donne tant.
-const GROW = 4500
-const HARVEST = 3
 
 // Ce qu'on fabrique, dans l'ordre montré : ce qu'il faut, ce qu'on obtient, et où (null : n'importe où,
 // sinon près d'un établi, d'une forge ou d'un chaudron sur un feu allumé), et le niveau du poste qu'il
-// faut (1 par défaut). Comme dans Valheim, sans établi on ne fait que la hache en pierre, la massue et
-// la torche ; les recettes sont celles de Valheim (sauf ce qui n'existe pas encore ici : le charbon,
-// les noyaux de surtling).
+// faut (1 par défaut). Sans établi on ne fait que la hache en pierre, la massue et
+// la torche.
 const RECIPES = [
-  // Le marteau : il le faut pour construire (et démonter), comme dans Valheim.
+  // Le marteau : il le faut pour construire (et démonter).
   { id: 'hammer', need: { wood: 3, stone: 2 }, gives: ['hammer', 1], at: null },
   { id: 'axe', need: { wood: 5, stone: 4 }, gives: ['axe', 1], at: null },
   { id: 'club', need: { wood: 6 }, gives: ['club', 1], at: null },
@@ -398,7 +461,7 @@ const RECIPES = [
   { id: 'ragtunic', need: { leather: 5 }, gives: ['ragtunic', 1], at: 'workbench' },
   { id: 'ragpants', need: { leather: 5 }, gives: ['ragpants', 1], at: 'workbench' },
   { id: 'pickaxe', need: { wood: 10, hardantler: 1 }, gives: ['pickaxe', 1], at: 'workbench' },
-  // Le cuir de cerf et les os, à l'établi de niveau 2 (comme dans Valheim).
+  // Le cuir de cerf et les os, à l'établi de niveau 2.
   { id: 'leatherhelmet', need: { hide: 6, bonefragments: 2 }, gives: ['leatherhelmet', 1], at: 'workbench', level: 2 },
   { id: 'tunic', need: { hide: 6, bonefragments: 2 }, gives: ['tunic', 1], at: 'workbench', level: 2 },
   { id: 'pants', need: { hide: 6, bonefragments: 2 }, gives: ['pants', 1], at: 'workbench', level: 2 },
@@ -468,6 +531,25 @@ function noise (random, side, step) {
   }
 }
 
+// Le sac : une pile tient tant de choses d'une sorte (au-delà, une case de plus) ;
+// chaque chose pèse ; on porte CARRY au plus (au-delà de 90 %, on avance lentement ; au bout, plus du
+// tout : le jeu le fait, floor refuse qu'on bouge).
+const CARRY = 300
+const STACK = { meat: 20, cooked: 20, carrotsoup: 10, jam: 10, arrow: 100, flintarrow: 100, bronzenails: 100, trophy: 20, antler: 20, hardantler: 10, surtlingcore: 20, copperore: 30, tinore: 30, copper: 30, tin: 30, bronze: 30 }
+const WEIGHT = {
+  wood: 2, finewood: 2, corewood: 2, stone: 2, flint: 1, resin: 0.3, meat: 1, cooked: 1, leather: 1, hide: 1, trollhide: 2,
+  antler: 1, hardantler: 2, trophy: 2, copperore: 10, tinore: 10, copper: 6, tin: 6, bronze: 6, bronzenails: 0.5,
+  arrow: 0.1, flintarrow: 0.1, raspberry: 0.1, blueberries: 0.1, mushroom: 0.1, carrot: 0.3, carrotsoup: 1, jam: 1,
+  greydwarfeye: 0.2, surtlingcore: 1, bonefragments: 0.5, beechseeds: 0.1, birchseeds: 0.1, firecone: 0.1, pinecone: 0.1,
+  hammer: 2, axe: 1, flintaxe: 1.5, bronzeaxe: 2, club: 2, knife: 0.3, spear: 1.5, pickaxe: 2, bronzepickaxe: 2.5,
+  bronzesword: 1.5, bronzemace: 2.5, bow: 1, finebow: 1, torch: 1, cultivator: 3,
+  ragtunic: 1, ragpants: 1, leatherhelmet: 1, tunic: 2, pants: 2, deercape: 1, trollhelmet: 3, trolltunic: 5,
+  trollpants: 5, trollcape: 1, bronzehelmet: 3, bronzeplate: 10, bronzegreaves: 8, woodshield: 3, towershield: 6, bronzebuckler: 4
+}
+// Ce qui se porte ou se tient en main : un par case.
+const stackOf = (kind) => (TOOLS[kind] || WEAR[kind] ? 1 : STACK[kind] ?? 50)
+const weightOf = (kind) => WEIGHT[kind] ?? 1
+
 // Un ordre de cases venu du jeu, nettoyé : des noms courts ou null, chacun une fois, SLOTS au plus.
 function arrange (before, order) {
   if (!Array.isArray(order)) return before
@@ -522,7 +604,7 @@ class Grid {
 }
 const between = ([lo, hi], random) => lo + random() * (hi - lo)
 
-// Les dégâts qui passent l'armure (comme dans Valheim) : moins l'armure, ou bien moins si elle est forte.
+// Les dégâts qui passent l'armure : moins l'armure, ou bien moins si elle est forte.
 function absorb (dmg, armor) {
   if (armor <= 0) return dmg
   return armor < dmg / 2 ? dmg - armor : (dmg * dmg) / (4 * armor)
@@ -540,9 +622,10 @@ function terrain (random) {
   const ponds = noise(random, SIDE, 18)
   const tone = noise(random, SIDE, 8)
   const woods = noise(random, SIDE, 22)
+  const patches = noise(random, SIDE, 110)
   const c = SIDE / 2
   // Les îles : celle du départ au milieu, les autres semées autour, un bras de mer entre chacune.
-  const islands = [{ x: c, y: c, r: ISLANDS.home, wild: 0.52 }]
+  const islands = [{ x: c, y: c, r: ISLANDS.home, wild: 0.5 }]
   const [n0, n1] = ISLANDS.count
   const want = n0 + Math.floor(random() * (n1 - n0 + 1))
   for (let k = 0; k < 20000 && islands.length < want; k++) {
@@ -551,8 +634,8 @@ function terrain (random) {
     const x = r * 1.4 + random() * (SIDE - r * 2.8)
     const y = r * 1.4 + random() * (SIDE - r * 2.8)
     if (islands.some((o) => Math.hypot(o.x - x, o.y - y) < (o.r + r) * 1.1 + ISLANDS.channel)) continue
-    // `wild` : à partir d'où (en part du rayon) commence la forêt noire ; certaines îles en sont pleines.
-    islands.push({ x, y, r, wild: 0.05 + random() * 0.75 })
+    // `wild` : le seuil de la forêt noire (plus il est bas, plus il y en a) ; certaines îles en sont pleines.
+    islands.push({ x, y, r, wild: 0.2 + random() * 0.55 })
   }
   // Pour chaque case, l'île la plus proche (en part de son rayon, la côte découpée par le bruit).
   const near = new Float32Array(SIDE * SIDE).fill(9)
@@ -577,8 +660,11 @@ function terrain (random) {
       const o = islands[owner[i]]
       // Plus on s'éloigne du centre de son île, plus c'est de l'eau ; le bruit découpe la côte et la lisière.
       const edge = near[i] + (land(x, y) - 0.5) * 0.3
-      const dark = Math.hypot(x - o.x, y - o.y) / o.r + (woods(x, y) - 0.5) * 0.35 > o.wild
-      const pond = ponds(x, y) > 0.86 && edge < 0.75 && Math.hypot(x - c, y - c) > 12
+      // La forêt noire par grandes taches (le bruit), pas en couronne : la prairie comme la forêt vont
+      // jusqu'à la côte. Autour du départ, la prairie.
+      const home = Math.max(0, 1 - Math.hypot(x - c, y - c) / MEADOW_HOME)
+      const dark = patches(x, y) * 0.8 + woods(x, y) * 0.2 - home * 0.7 > o.wild
+      const pond = ponds(x, y) > 0.9 && edge < 0.75 && Math.hypot(x - c, y - c) > 12
       let t = T.grass
       if (edge > 0.98) t = T.deep
       else if (edge > 0.9 || pond) t = T.water
@@ -592,15 +678,47 @@ function terrain (random) {
       forest[i] = dark ? 1 : 0
     }
   }
-  // Le sable autour des étangs.
+  // Les rivières : d'un point à l'intérieur, elles serpentent vers la mer (en s'écartant du centre de
+  // l'île), de plus en plus larges ; jamais au départ.
+  for (const o of islands) {
+    const count = Math.round((o.r / RIVERS.per) * (0.6 + random() * 0.8))
+    for (let k = 0; k < count; k++) {
+      let x = o.x + (random() - 0.5) * o.r * 0.7
+      let y = o.y + (random() - 0.5) * o.r * 0.7
+      if (Math.hypot(x - c, y - c) < MEADOW_HOME || WET.has(tiles[Math.round(y) * SIDE + Math.round(x)])) continue
+      let a = Math.atan2(y - o.y, x - o.x) + (random() - 0.5) * 1.2
+      const [w0, w1] = RIVERS.width
+      const width = w0 + random() * (w1 - w0)
+      for (let s = 0; s < o.r * 4; s++) {
+        // Elle serpente, ramenée peu à peu vers le large.
+        const out = Math.atan2(y - o.y, x - o.x)
+        a += (random() - 0.5) * 0.25 + Math.atan2(Math.sin(out - a), Math.cos(out - a)) * 0.03
+        x += Math.cos(a)
+        y += Math.sin(a)
+        if (x < 4 || y < 4 || x > SIDE - 5 || y > SIDE - 5 || Math.hypot(x - c, y - c) < MEADOW_HOME * 0.6) break
+        const w = width * (0.6 + Math.min(1, s / o.r) * 0.8)
+        let sea = false
+        for (let j = Math.floor(y - w); j <= Math.ceil(y + w); j++) {
+          for (let i = Math.floor(x - w); i <= Math.ceil(x + w); i++) {
+            if (Math.hypot(i - x, j - y) > w) continue
+            const t = tiles[j * SIDE + i]
+            if (t === T.deep) sea = true
+            else tiles[j * SIDE + i] = T.water
+          }
+        }
+        if (sea) break
+      }
+    }
+  }
+  // Le sable autour des étangs et des rivières.
   for (let y = 1; y < SIDE - 1; y++) {
     for (let x = 1; x < SIDE - 1; x++) {
       if (WET.has(tiles[y * SIDE + x]) || tiles[y * SIDE + x] === T.sand) continue
       if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => tiles[(y + dy) * SIDE + x + dx] === T.water)) tiles[y * SIDE + x] = T.sand
     }
   }
-  // Des chemins qui partent du centre des grandes îles en serpentant, jusqu'à la côte.
-  for (const o of islands.filter((o) => o.r >= 50)) {
+  // Des chemins qui partent du centre des îles en serpentant, jusqu'à l'eau (une rivière les coupe).
+  for (const o of islands) {
     const paths = o === islands[0] ? 4 : 2 + Math.floor(random() * 2)
     for (let k = 0; k < paths; k++) {
       let x = o.x
@@ -619,12 +737,247 @@ function terrain (random) {
       }
     }
   }
-  return { tiles: tiles.join(''), forest, islands, spawn: { x: c * TILE + TILE / 2, y: c * TILE + TILE / 2 } }
+  // L'eau peu profonde au bord (on y patauge), profonde au-delà (on y nage) : la mer, les étangs, le
+  // milieu des rivières.
+  let shore = []
+  const far = new Uint8Array(SIDE * SIDE)
+  for (let i = 0; i < SIDE * SIDE; i++) if (!WET.has(tiles[i])) { far[i] = 1; shore.push(i) }
+  for (let d = 2; d <= SHALLOW + 1 && shore.length; d++) {
+    const next = []
+    for (const i of shore) {
+      const x = i % SIDE
+      for (const j of [x > 0 ? i - 1 : -1, x < SIDE - 1 ? i + 1 : -1, i - SIDE, i + SIDE]) {
+        if (j < 0 || j >= SIDE * SIDE || far[j]) continue
+        far[j] = d
+        next.push(j)
+      }
+    }
+    shore = next
+  }
+  for (let i = 0; i < SIDE * SIDE; i++) {
+    if (tiles[i] === T.water && !far[i]) tiles[i] = T.deep
+    else if (tiles[i] === T.deep && far[i]) tiles[i] = T.water
+  }
+  const relief = landform(tiles, random, c)
+  return { tiles: tiles.join(''), forest, islands, relief, spawn: { x: c * TILE + TILE / 2, y: c * TILE + TILE / 2 } }
+}
+
+// Le relief : pour chaque case, son palier (0 au bord de l'eau, jusqu'à RELIEF.levels à l'intérieur
+// des terres) et, en plus (RAMP), si c'est une rampe. De grandes collines (le bruit), qui redescendent
+// vers la mer et les rivières ; une plaine autour du départ. Le bord d'un palier plus haut est une
+// falaise (voir `cliffs`), sauf aux rampes : chaque palier en a au moins une vers le bas (et les
+// chemins passent), si bien que tout endroit de l'île se rejoint depuis le bord de l'eau.
+function landform (tiles, random, c) {
+  const n = SIDE * SIDE
+  const level = new Uint8Array(n)
+  const land = (i) => !WET.has(tiles[i])
+  // La distance à l'eau, en cases (jusqu'à RELIEF.falloff).
+  const dist = new Uint8Array(n).fill(255)
+  let queue = []
+  for (let i = 0; i < n; i++) if (!land(i)) { dist[i] = 0; queue.push(i) }
+  for (let d = 1; d <= RELIEF.falloff && queue.length; d++) {
+    const next = []
+    for (const i of queue) {
+      const x = i % SIDE
+      for (const j of [i - 1, i + 1, i - SIDE, i + SIDE]) {
+        if (j < 0 || j >= n || Math.abs((j % SIDE) - x) > 1 || dist[j] !== 255) continue
+        dist[j] = d
+        next.push(j)
+      }
+    }
+    queue = next
+  }
+  const big = noise(random, SIDE, RELIEF.hills)
+  const small = noise(random, SIDE, RELIEF.hills / 3)
+  const fine = noise(random, SIDE, RELIEF.hills / 8)
+  // Le bruit est déformé par un autre (sinon ses courbes suivent sa grille : des bords tout droits).
+  const warpX = noise(random, SIDE, RELIEF.hills / 2)
+  const warpY = noise(random, SIDE, RELIEF.hills / 2)
+  for (let y = 0; y < SIDE; y++) {
+    for (let x = 0; x < SIDE; x++) {
+      const i = y * SIDE + x
+      if (!land(i)) continue
+      const near = Math.min(1, Math.max(0, (Math.min(dist[i], RELIEF.falloff) - 2) / (RELIEF.falloff - 2)))
+      const home = Math.max(0, 1 - Math.hypot(x - c, y - c) / (MEADOW_HOME * 0.9))
+      const [wx, wy] = [x + (warpX(x, y) - 0.5) * RELIEF.hills * 0.9, y + (warpY(x, y) - 0.5) * RELIEF.hills * 0.9]
+      const [cx, cy] = [Math.min(SIDE - 1, Math.max(0, wx)), Math.min(SIDE - 1, Math.max(0, wy))]
+      const h = ((big(cx, cy) * 0.62 + small(cx, cy) * 0.28 + fine(cx, cy) * 0.1) - RELIEF.sea) * RELIEF.steep * near * (1 - home)
+      level[i] = Math.max(0, Math.min(RELIEF.levels, Math.floor(h * (RELIEF.levels + 1))))
+    }
+  }
+  const at = (x, y) => (x < 0 || y < 0 || x >= SIDE || y >= SIDE ? -1 : y * SIDE + x)
+  // Les crêtes et les bandes de deux cases de large, les pointes (une case qui ne tient au palier que
+  // par un ou deux côtés) : rabotées, pour des paliers bien ronds.
+  for (let pass = 0; pass < 3; pass++) {
+    // (Chaque passe regarde le relief d'avant elle : pas d'érosion qui court d'une case à l'autre.)
+    const was = level.slice()
+    for (let y = 2; y < SIDE - 2; y++) {
+      for (let x = 2; x < SIDE - 2; x++) {
+        const i = y * SIDE + x
+        const l = was[i]
+        if (!l) continue
+        const low = (j) => was[j] < l
+        const held = [i - 1, i + 1, i - SIDE, i + SIDE].filter((j) => !low(j)).length
+        // Une bande d'une ou deux cases de large (en long ou en travers).
+        const thin = (low(i - 1) && (low(i + 1) || low(i + 2))) || (low(i + 1) && low(i - 2))
+        const flat = (low(i - SIDE) && (low(i + SIDE) || low(i + 2 * SIDE))) || (low(i + SIDE) && low(i - 2 * SIDE))
+        if (held <= 1 || thin || flat) level[i] = l - 1
+      }
+    }
+  }
+  const comp = new Int32Array(n)
+  for (let L = RELIEF.levels; L >= 1; L--) {
+    comp.fill(-1)
+    for (let s = 0; s < n; s++) {
+      if (level[s] < L || comp[s] !== -1) continue
+      const part = [s]
+      comp[s] = s
+      for (let k = 0; k < part.length; k++) {
+        const i = part[k]
+        const x = i % SIDE
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const j = at(x + dx, Math.floor(i / SIDE) + dy)
+          if (j >= 0 && level[j] >= L && comp[j] === -1) { comp[j] = s; part.push(j) }
+        }
+      }
+      if (part.length < RELIEF.smallest) for (const i of part) level[i] = Math.min(level[i], L - 1)
+    }
+  }
+  // Les falaises (le bord d'un palier plus haut), puis les rampes.
+  const RAMPED = RELIEF.ramp
+  let cliff = cliffs(level, tiles)
+  const walk = (i) => i >= 0 && land(i) && !cliff[i]
+  const ramp = (i) => { level[i] |= RAMPED; cliff[i] = 0 }
+  // Une rampe depuis la case `i` (au bord, sur le palier haut) dans le sens (dx, dy) : elle descend
+  // jusqu'à une case où l'on marche (deux falaises qui se suivent : deux marches).
+  const stairs = (i, dx, dy) => {
+    const way = [i]
+    let x = i % SIDE
+    let y = Math.floor(i / SIDE)
+    for (let k = 0; k < RELIEF.levels; k++) {
+      x += dx
+      y += dy
+      const j = at(x, y)
+      if (j < 0 || !land(j)) return false
+      if (!cliff[j]) {
+        for (const w of way) ramp(w)
+        return true
+      }
+      way.push(j)
+    }
+    return false
+  }
+  // Une rampe large : celle-ci, et les cases de falaise d'à côté (en travers), qui descendent pareil.
+  const wide = (i, dx, dy) => {
+    if (!stairs(i, dx, dy)) return false
+    const x = i % SIDE
+    const y = Math.floor(i / SIDE)
+    for (const s of [-1, 1]) {
+      const j = at(x + dy * s, y + dx * s)
+      if (j >= 0 && cliff[j] && (level[j] & ~RAMPED) === (level[i] & ~RAMPED)) stairs(j, dx, dy)
+    }
+    return true
+  }
+  // Les chemins passent (là où un chemin coupe une falaise : une rampe).
+  for (let i = 0; i < n; i++) {
+    if (!cliff[i] || tiles[i] !== T.path) continue
+    const x = i % SIDE
+    const y = Math.floor(i / SIDE)
+    for (const [dx, dy] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) {
+      const back = at(x - dx, y - dy)
+      if (back >= 0 && (level[back] & ~RAMPED) === (level[i] & ~RAMPED) && walk(back) && wide(i, dx, dy)) break
+    }
+  }
+  // Chaque morceau où l'on marche doit toucher le bord de l'eau (un palier 0) : sinon, une rampe de
+  // plus (vers le sud de préférence : on voit l'escalier), et d'autres sur les grands paliers.
+  for (let round = 0; round < 40; round++) {
+    comp.fill(-1)
+    const parts = []
+    for (let s = 0; s < n; s++) {
+      if (!walk(s) || comp[s] !== -1) continue
+      const part = [s]
+      comp[s] = parts.length
+      let low = false
+      for (let k = 0; k < part.length; k++) {
+        const i = part[k]
+        if ((level[i] & ~RAMPED) === 0) low = true
+        const x = i % SIDE
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const j = at(x + dx, Math.floor(i / SIDE) + dy)
+          if (walk(j) && comp[j] === -1) { comp[j] = parts.length; part.push(j) }
+        }
+      }
+      parts.push({ tiles: part, low })
+    }
+    let added = 0
+    let lowered = 0
+    for (const part of parts) {
+      if (part.low && round > 0) continue
+      // Les bords de ce morceau : une case de falaise à côté de lui, d'où une rampe peut descendre.
+      const edges = []
+      for (const i of part.tiles) {
+        const x = i % SIDE
+        const y = Math.floor(i / SIDE)
+        for (const [dx, dy] of [[0, 1], [1, 0], [-1, 0], [0, -1]]) {
+          const e = at(x + dx, y + dy)
+          if (e < 0 || !cliff[e] || (level[e] & ~RAMPED) !== (level[i] & ~RAMPED)) continue
+          edges.push([e, dx, dy, (dy === 1 ? 2 : 0) + random()])
+        }
+      }
+      edges.sort((a, b) => b[3] - a[3])
+      // Un palier qui ne rejoint pas l'eau : au moins une rampe ; un grand : une de plus par tant de cases.
+      const want = part.low ? Math.floor(part.tiles.length / RELIEF.rampEvery) : 1 + Math.floor(part.tiles.length / RELIEF.rampEvery)
+      const placed = []
+      for (const [e, dx, dy] of edges) {
+        if (placed.length >= want || (!part.low && part.tiles.length < RELIEF.pocket)) break
+        const ex = e % SIDE
+        const ey = Math.floor(e / SIDE)
+        if (placed.some(([px, py]) => Math.hypot(px - ex, py - ey) < RELIEF.rampRoom)) continue
+        if (wide(e, dx, dy)) {
+          placed.push([ex, ey])
+          added++
+        }
+      }
+      // Aucune rampe possible (une falaise qui tombe dans la mer, des marches trop hautes), ou une toute
+      // petite poche : ce palier s'abaisse d'un cran, avec son bord ; on recommence.
+      if (!part.low && (!placed.length || part.tiles.length < RELIEF.pocket)) {
+        for (const i of part.tiles) if (level[i] & ~RAMPED) level[i]--
+        for (const [e] of edges) if (level[e] & ~RAMPED && !(level[e] & RAMPED)) level[e]--
+        lowered++
+      }
+    }
+    if (lowered) cliff = cliffs(level, tiles)
+    if (!added && !lowered && round > 0) break
+  }
+  return level
+}
+
+// Les falaises : sur un palier plus haut qu'une case voisine (de terre, ou l'eau au pied), sauf les
+// rampes. Une case par falaise ; on ne la traverse pas, on n'y bâtit pas.
+function cliffs (relief, tiles) {
+  const cliff = new Uint8Array(SIDE * SIDE)
+  for (let y = 0; y < SIDE; y++) {
+    for (let x = 0; x < SIDE; x++) {
+      const i = y * SIDE + x
+      const l = relief[i] & ~RELIEF.ramp
+      if (!l || relief[i] & RELIEF.ramp) continue
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const [nx, ny] = [x + dx, y + dy]
+        if (nx < 0 || ny < 0 || nx >= SIDE || ny >= SIDE) continue
+        const j = ny * SIDE + nx
+        if ((relief[j] & ~RELIEF.ramp) < l || WET.has(tiles[j])) {
+          cliff[i] = 1
+          break
+        }
+      }
+    }
+  }
+  return cliff
 }
 
 // Ce qui dure d'un redémarrage de floor à l'autre change de forme avec le monde : un état d'une autre
 // version est oublié (le monde reprend de sa graine).
-const VERSION = 3
+const VERSION = 6
 
 class World {
   constructor ({ seed = 1, random = Math.random, now = 0 } = {}) {
@@ -636,8 +989,11 @@ class World {
     // Le temps qu'il fait : la pluie ou non, jusqu'à quand.
     this.weather = { rain: false, until: now + DRY[0] }
     const gen = seeded(seed)
-    const { tiles, forest, spawn, islands } = terrain(gen)
+    const { tiles, forest, spawn, islands, relief } = terrain(gen)
     this.tiles = tiles
+    // Le palier de chaque case (et les rampes), et les falaises qu'on ne traverse pas.
+    this.relief = relief
+    this.cliff = cliffs(relief, tiles)
     this.forest = forest
     this.spawn = spawn
     this.islands = islands
@@ -675,6 +1031,7 @@ class World {
     // terre retournée au cultivateur (on n'y plante que là).
     this.solid = new Map()
     this.flat = new Map()
+    this.covers = new Map()
     this.cropAt = new Map()
     this.tilled = new Set()
     // L'invocation en cours (Eikthyr arrive à `at`).
@@ -684,14 +1041,15 @@ class World {
     this.news = []
     this.plant(gen)
     this.raise()
+    this.veins()
     this.litterAt = 0
     this.beastsAt = 0
-    this.restock(true)
+    this.restock()
     this.repopulate(true)
   }
 
   fresh () {
-    return { trees: new Set(), rocks: new Set(), bushes: new Set(), items: new Set(), fires: new Set(), pieces: new Set(), crops: new Set(), boats: new Set(), tombs: new Set(), props: new Set(), tilled: new Set(), gone: new Set() }
+    return { trees: new Set(), grown: new Set(), rocks: new Set(), bushes: new Set(), items: new Set(), fires: new Set(), pieces: new Set(), crops: new Set(), boats: new Set(), tombs: new Set(), props: new Set(), tilled: new Set(), gone: new Set() }
   }
 
   // La case sous un point du monde (l'eau profonde hors de la carte, sauf dans un donjon : ses murs et ses
@@ -754,7 +1112,9 @@ class World {
       const tx = 6 + Math.floor(random() * (SIDE - 12))
       const ty = 6 + Math.floor(random() * (SIDE - 12))
       let ok = !this.crypts.some((c) => Math.hypot(c.x / TILE - tx, c.y / TILE - ty) < 40)
-      for (let j = ty - 5; j <= ty + 3 && ok; j++) for (let i = tx - 4; i <= tx + 4 && ok; i++) ok = this.tiles[j * SIDE + i] === T.forest
+      // Sur un même palier, loin de toute falaise.
+      const flat = this.relief[ty * SIDE + tx]
+      for (let j = ty - 6; j <= ty + 4 && ok; j++) for (let i = tx - 5; i <= tx + 5 && ok; i++) ok = this.tiles[j * SIDE + i] === T.forest && this.relief[j * SIDE + i] === flat && !this.cliff[j * SIDE + i]
       if (!ok) continue
       const n = this.crypts.length
       // Le seuil du mausolée (le bas de sa porte, où l'escalier descend), et où va son donjon.
@@ -774,6 +1134,26 @@ class World {
       }
     }
     for (const b of [...this.bushes.values()]) if (near(b)) this.bushes.delete(b.id)
+  }
+
+  // Les gisements d'étain, au bord de l'eau dans la forêt noire (toujours les mêmes pour une graine ;
+  // posés après tout le reste, leur tirage à part : les ids d'avant ne bougent pas).
+  veins () {
+    const random = seeded(this.seed * 6007 + 29)
+    const shore = (x, y) => [0, 1, 2, 3, 4, 5, 6, 7].some((a) => [0.5, 1].some((f) => !this.dry(x + Math.cos(a * Math.PI / 4) * TIN.shore * f, y + Math.sin(a * Math.PI / 4) * TIN.shore * f)))
+    const wanted = Math.round(TIN.count * this.scale)
+    let n = 0
+    for (let k = 0; k < wanted * 2000 && n < wanted; k++) {
+      const x = Math.round(random() * SIZE)
+      const y = Math.round(random() * SIZE)
+      if (!this.wild(x, y) || !this.walkable(x, y) || this.tile(x, y) === T.path || !shore(x, y)) continue
+      if (this.grid.trees.near(x, y, 30).some((t) => Math.hypot(t.x - x, t.y - y) < 20) || this.grid.rocks.near(x, y, 50).some((k) => Math.hypot(k.x - x, k.y - y) < 40)) continue
+      const id = this.nextId++
+      const rock = { id, kind: 'tin', x, y, hp: ROCKS.tin.hp, gone: false, back: 0 }
+      this.rocks.set(id, rock)
+      this.grid.rocks.add(rock)
+      n++
+    }
   }
 
   // Devant le mausolée (là où l'on arrive en remontant).
@@ -918,6 +1298,13 @@ class World {
     return (((this.time - this.dawn) % DAY) + DAY) % DAY
   }
 
+  // La lune de cette nuit (0 : nuit noire, 1 : pleine lune), la même pour tous : tirée de la graine et
+  // du numéro de la nuit (l'aube qui suit compte encore pour elle).
+  moon () {
+    const night = Math.floor((this.time - this.dawn - 120) / DAY)
+    return seeded(this.seed * 977 + night * 7919)()
+  }
+
   night () {
     return this.clock() >= DAY - NIGHT
   }
@@ -940,6 +1327,8 @@ class World {
     const thick = noise(gen, SIZE, 260)
     const near = (x, y, r) => this.grid.trees.near(x, y, r).some((t) => Math.hypot(t.x - x, t.y - y) < r) || this.grid.rocks.near(x, y, r + 10).some((k) => Math.hypot(k.x - x, k.y - y) < r + 10)
     const addTree = (kind, x, y) => {
+      // (Pas sur une falaise ni une rampe : rien n'y pousse, on y passe.)
+      if (this.steep(x, y)) return
       const id = this.nextId++
       const t = { id, kind, x: Math.round(x), y: Math.round(y), hp: TREES[kind].hp, stump: false, regrow: 0 }
       this.trees.set(id, t)
@@ -967,7 +1356,7 @@ class World {
       for (let k = 0; k < wanted * 300 && n < wanted; k++) {
         const x = Math.round(gen() * SIZE)
         const y = Math.round(gen() * SIZE)
-        if (!this.dry(x, y) || this.tile(x, y) === T.path || !fits(x, y) || Math.hypot(x - this.spawn.x, y - this.spawn.y) < 70 || near(x, y, 30)) continue
+        if (!this.dry(x, y) || [[0, 0], [-16, 0], [16, 0], [0, -16], [0, 16]].some(([dx, dy]) => this.steep(x + dx, y + dy)) || this.tile(x, y) === T.path || !fits(x, y) || Math.hypot(x - this.spawn.x, y - this.spawn.y) < 70 || near(x, y, 30)) continue
         const id = this.nextId++
         const rock = { id, kind, x: Math.round(x), y: Math.round(y), hp: ROCKS[kind].hp, gone: false, back: 0 }
         this.rocks.set(id, rock)
@@ -983,7 +1372,7 @@ class World {
       for (let a = -0.5; a <= 0.5 && !this.altar; a += 0.1) {
         const x = Math.round(this.spawn.x + Math.sin(a) * r)
         const y = Math.round(this.spawn.y - Math.cos(a) * r)
-        const ok = [[0, 0], [-60, 0], [60, 0], [0, -60], [0, 60]].every(([dx, dy]) => GRASS.has(this.tile(x + dx, y + dy)) || this.tile(x + dx, y + dy) === T.path)
+        const ok = [[0, 0], [-60, 0], [60, 0], [0, -60], [0, 60]].every(([dx, dy]) => (GRASS.has(this.tile(x + dx, y + dy)) || this.tile(x + dx, y + dy) === T.path) && !this.steep(x + dx, y + dy))
         if (ok) this.altar = { x, y }
       }
     }
@@ -1008,7 +1397,7 @@ class World {
       for (let k = 0; k < wanted * 200 && n < wanted; k++) {
         const x = Math.round(gen() * SIZE)
         const y = Math.round(gen() * SIZE)
-        if (!fits(x, y) || near(x, y, 22)) continue
+        if (!fits(x, y) || this.steep(x, y) || near(x, y, 22)) continue
         if (placed.near(x, y, room).some((b) => Math.hypot(b.x - x, b.y - y) < room) || Math.hypot(x - this.altar.x, y - this.altar.y) < 90) continue
         const id = this.nextId++
         const bush = { id, kind, x, y, ripe: true, back: 0 }
@@ -1041,7 +1430,9 @@ class World {
   // On peut se tenir là : la terre ferme, pas dans un tronc, un rocher, l'autel, un mausolée, un feu, un
   // mur (d'une base, d'un donjon), une porte fermée, un coffre ou un brasero d'un donjon.
   walkable (x, y) {
-    if (!this.dry(x, y)) return false
+    if (!this.dry(x, y) && !this.bridged(x, y)) return false
+    const i = this.cell(x, y)
+    if (i >= 0 && this.cliff[i]) return false
     for (const dx of [-4, 0, 4]) if (this.tile(x + dx, y) === T.cryptwall) return false
     const c = this.cryptAt(x, y)
     if (c) return !c.d.solid.some((p) => Math.abs(p.x - x) < PROPS[p.kind].solid[0] && y > p.y - PROPS[p.kind].solid[1] && y < p.y + 2)
@@ -1050,7 +1441,7 @@ class World {
       if (Math.abs(x - m.x) < CRYPT.w && y > m.y - CRYPT.h && y < m.y - 2 && !door) return false
     }
     for (const t of this.grid.trees.near(x, y, 10)) if (!t.stump && Math.abs(t.x - x) < 8 && Math.abs(t.y - y) < 6) return false
-    for (const k of this.grid.rocks.near(x, y, 18)) if (!k.gone && Math.abs(k.x - x) < (k.kind === 'copper' ? 16 : 13) && Math.abs(k.y - y) < 7) return false
+    for (const k of this.grid.rocks.near(x, y, 18)) if (!k.gone && Math.abs(k.x - x) < (k.kind === 'stone' ? 13 : 16) && Math.abs(k.y - y) < 7) return false
     if (Math.abs(this.altar.x - x) < 18 && Math.abs(this.altar.y - y) < 8) return false
     for (const f of this.grid.fires.near(x, y, 10)) if (Math.hypot(f.x - x, f.y - y) < 10) return false
     for (const dx of [-4, 0, 4]) {
@@ -1062,7 +1453,46 @@ class World {
 
   // Où va un bateau : sur l'eau, la coque (de part et d'autre) aussi.
   sailable (x, y) {
-    return [-12, 0, 12].every((dx) => this.cell(x + dx, y) >= 0 && !this.dry(x + dx, y))
+    return [-12, 0, 12].every((dx) => this.cell(x + dx, y) >= 0 && !this.dry(x + dx, y) && !this.bridged(x + dx, y))
+  }
+
+  // Une falaise ou une rampe sous ce point (rien n'y pousse, on n'y bâtit pas).
+  steep (x, y) {
+    const i = this.cell(x, y)
+    return i >= 0 && (this.cliff[i] === 1 || (this.relief[i] & RELIEF.ramp) !== 0)
+  }
+
+  // Un pont sur la case de ce point.
+  bridged (x, y) {
+    return this.flat.get(this.cell(x, y))?.kind === 'bridge'
+  }
+
+  // On nage là : dans l'eau profonde (douce ou de mer), sans pont, hors d'un donjon.
+  swimmable (x, y) {
+    return this.cell(x, y) >= 0 && this.tile(x, y) === T.deep && !this.bridged(x, y) && !this.cryptAt(x, y)
+  }
+
+  // On patauge là : dans l'eau peu profonde, près de la rive (on y marche, sans nager ni se noyer).
+  wadeable (x, y) {
+    return this.cell(x, y) >= 0 && this.tile(x, y) === T.water && !this.bridged(x, y) && !this.cryptAt(x, y)
+  }
+
+  // Le joueur nage (ni à bord, ni sur un pont).
+  swimming (p) {
+    return !p.boat && this.swimmable(p.x, p.y)
+  }
+
+  // Le jeu dit que le nageur n'a plus d'endurance : il se noie un peu (pas plus d'une fois par seconde,
+  // l'armure n'y fait rien).
+  drown (id) {
+    const p = this.players.get(id)
+    if (!p?.alive || !this.swimming(p) || this.time - (p.drowned ?? -99) < 0.9) return false
+    p.drowned = this.time
+    p.hp -= DROWN
+    p.hurt = this.time
+    this.news.push({ t: 'fx', k: 'hurt', id: p.id, dmg: DROWN, x: Math.round(p.x), y: Math.round(p.y) })
+    if (p.hp <= 0) this.die(p, null)
+    return true
   }
 
   // Près d'un établi (les bêtes n'y reviennent pas, on y bâtit).
@@ -1071,17 +1501,14 @@ class World {
   }
 
   // Remet par terre ce que la nature donne, qu'il y en ait toujours : branches et pierres partout,
-  // silex sur les plages, champignons sous les arbres, carottes sauvages dans la forêt
-  // noire, étain sur ses plages (lui, seulement au départ).
-  restock (start = false) {
+  // silex sur les plages, champignons sous les arbres, carottes sauvages dans la forêt noire.
+  restock () {
     const fits = {
       flint: (x, y) => this.tile(x, y) === T.sand,
       mushroom: (x, y) => SOIL.has(this.tile(x, y)) && this.grid.trees.near(x, y, 45).some((t) => !t.stump && Math.hypot(t.x - x, t.y - y) < 45),
-      wildcarrot: (x, y) => this.tile(x, y) === T.forest,
-      tinore: (x, y) => this.tile(x, y) === T.sand && this.wild(x, y)
+      wildcarrot: (x, y) => this.tile(x, y) === T.forest
     }
     for (const kind of Object.keys(LITTER)) {
-      if (ONCE.has(kind) && !start) continue
       let n = [...this.items.values()].filter((i) => i.kind === kind && i.wild).length
       const wanted = Math.round(LITTER[kind] * this.scale)
       while (n < wanted) {
@@ -1293,11 +1720,78 @@ class World {
     p.d = [0, 1, 2, 3].includes(d) ? d : p.d
     p.m = [0, 1, 2].includes(m) ? m : 0
     const speed = this.time - (p.rolled ?? -99) < 0.6 ? COMBAT.rollSpeed : RUN
-    if (far > speed * dt * MOVE_SLACK + 4 || !(p.boat ? this.sailable(x, y) : this.walkable(x, y))) return false
+    // Trop chargé : on ne bouge plus (sauf à bord).
+    if (!p.boat && far > 2 && this.load(p) >= CARRY) return false
+    if (far > speed * dt * MOVE_SLACK + 4 || !(p.boat ? this.sailable(x, y) : this.walkable(x, y) || this.wadeable(x, y) || this.swimmable(x, y))) return false
     if (far > 1) p.asleep = false
     p.x = x
     p.y = y
     p.moved = this.time
+    return true
+  }
+
+  // Sauter une falaise, en descendant (comme on saute d'un rebord) : du palier où l'on est jusqu'en
+  // (x, y), plus bas, à pas plus de JUMP cases, rien que de la falaise entre les deux. false : refusé.
+  jump (id, x, y) {
+    const p = this.players.get(id)
+    if (!p?.alive || p.boat || !Number.isFinite(x) || !Number.isFinite(y) || this.swimming(p)) return false
+    const from = this.cell(p.x, p.y)
+    const to = this.cell(x, y)
+    if (from < 0 || to < 0 || this.cliff[from] || !this.walkable(x, y)) return false
+    const top = this.relief[from] & ~RELIEF.ramp
+    const low = this.relief[to] & ~RELIEF.ramp
+    const far = Math.hypot(x - p.x, y - p.y)
+    if (low >= top || far > JUMP * TILE) return false
+    for (let k = 1; k < far / 4; k++) {
+      const [sx, sy] = [p.x + ((x - p.x) * k * 4) / far, p.y + ((y - p.y) * k * 4) / far]
+      const i = this.cell(sx, sy)
+      const l = this.relief[i] & ~RELIEF.ramp
+      if (l > top || (!this.cliff[i] && !this.walkable(sx, sy))) return false
+    }
+    Object.assign(p, { x, y, moved: this.time })
+    this.news.push({ t: 'fx', k: 'jump', id: p.id, player: p.id, x: Math.round(x), y: Math.round(y) })
+    return true
+  }
+
+  // Il reste de la place pour une chose de plus de cette sorte dans le sac.
+  room (p, kind) {
+    return this.fit(p, kind, 1) > 0
+  }
+
+  // Combien de choses de cette sorte tiennent encore dans le sac (jusqu'à `n`) : de la place dans sa
+  // dernière pile, ou des cases libres.
+  fit (p, kind, n) {
+    const have = this.bagged(p, kind)
+    const stack = stackOf(kind)
+    const free = (SLOTS - this.bag(p)) * stack + (have ? (stack - (have % stack || stack)) : 0)
+    return Math.max(0, Math.min(n, free))
+  }
+
+  // Combien de choses de cette sorte sont dans le sac (ce qu'on porte a ses propres places).
+  bagged (p, kind) {
+    const n = p.inv[kind] ?? 0
+    return Object.values(p.worn).includes(kind) ? n - 1 : n
+  }
+
+  // Les cases prises dans le sac : une par pile.
+  bag (p) {
+    return Object.keys(p.inv).reduce((sum, k) => sum + Math.ceil(Math.max(0, this.bagged(p, k)) / stackOf(k)), 0)
+  }
+
+  // Ce que porte le joueur (tout ce qu'il a, sur lui comme dans le sac).
+  load (p) {
+    return Object.entries(p.inv).reduce((sum, [k, n]) => sum + n * weightOf(k), 0)
+  }
+
+  // Jeter par terre ce qu'on a de cette sorte (toute la pile), devant soi : n'importe qui peut le
+  // ramasser ; il finit par disparaître (DROP_TIME).
+  discard (id, kind) {
+    const p = this.players.get(id)
+    const n = p?.alive && typeof kind === 'string' ? p.inv[kind] ?? 0 : 0
+    if (!n || !this.take(p, kind, n)) return false
+    // (Assez loin pour que le jeu ne le ramasse pas aussitôt en passant dessus.)
+    const [dx, dy] = [[0, 26], [0, -26], [-26, 0], [26, 0]][p.d] ?? [0, 26]
+    this.drop(kind, n, p.x + dx, p.y + dy)
     return true
   }
 
@@ -1363,8 +1857,14 @@ class World {
     const p = this.players.get(id)
     const w = WEAR[kind]
     if (!p || !w || !p.inv[kind]) return
-    if (p.worn[w.slot] === kind) delete p.worn[w.slot]
-    else p.worn[w.slot] = kind
+    if (p.worn[w.slot] === kind) {
+      // Retiré, il revient dans le sac : il y faut une case.
+      delete p.worn[w.slot]
+      if (this.bag(p) > SLOTS) {
+        p.worn[w.slot] = kind
+        return this.news.push({ t: 'fx', k: 'full', player: p.id, x: Math.round(p.x), y: Math.round(p.y) })
+      }
+    } else p.worn[w.slot] = kind
     this.news.push({ t: 'inv', player: p.id })
   }
 
@@ -1379,7 +1879,7 @@ class World {
   // lance) ; sinon il continue la série (voir COMBAT).
   hit (id, heavy = false) {
     const p = this.players.get(id)
-    if (!p?.alive || this.time < p.ready) return
+    if (!p?.alive || this.time < p.ready - HIT_SLACK || this.swimming(p)) return
     p.guard = null
     const tool = this.tool(p)
     if (heavy && p.held === 'spear') return this.throw(p, tool)
@@ -1400,7 +1900,7 @@ class World {
       return this.smite(beast, p, tool, heavy ? 'heavy' : final ? 'final' : null)
     }
     p.combo = 0
-    const rock = this.grid.rocks.near(at.x, at.y, reach + 6).filter((k) => !k.gone && Math.hypot(k.x - at.x, k.y - 6 - at.y) < reach * 0.8 + (k.kind === 'copper' ? 6 : 0)).sort((a, b) => dist(a, at) - dist(b, at))[0]
+    const rock = this.grid.rocks.near(at.x, at.y, reach + 6).filter((k) => !k.gone && Math.hypot(k.x - at.x, k.y - 6 - at.y) < reach * 0.8 + (k.kind === 'stone' ? 0 : 6)).sort((a, b) => dist(a, at) - dist(b, at))[0]
     if (rock) {
       if (!tool.mine) return this.news.push({ t: 'fx', k: 'nomine', player: p.id, id: rock.id })
       rock.hp -= tool.mine
@@ -1492,7 +1992,7 @@ class World {
   // La roulade : quelques instants où aucun coup ne porte (le jeu tient l'endurance).
   roll (id) {
     const p = this.players.get(id)
-    if (!p?.alive || p.boat || this.time - (p.rolled ?? -99) < COMBAT.roll) return
+    if (!p?.alive || p.boat || this.swimming(p) || this.time - (p.rolled ?? -99) < COMBAT.roll) return
     p.rolled = this.time
     p.guard = null
     p.act = 'roll'
@@ -1519,8 +2019,9 @@ class World {
   uproot (tree) {
     this.remove(this.trees, tree.id)
     this.grid.trees.delete(tree)
-    this.uprooted.add(tree.id)
+    if (!tree.grown) this.uprooted.add(tree.id)
     this.drop('wood', 1, tree.x, tree.y)
+    if (this.random() < SEED_CHANCE) this.drop(SEEDS[tree.kind], 1, tree.x + 8, tree.y + 4)
     this.news.push({ t: 'fx', k: 'uproot', id: tree.id, x: tree.x, y: tree.y })
   }
 
@@ -1540,16 +2041,17 @@ class World {
   }
 
   // Tirer une flèche vers `ang` (radians) : il faut un arc en main et des flèches (la meilleure part).
-  shoot (id, ang) {
+  shoot (id, ang, power = 1) {
     const p = this.players.get(id)
     const bow = p && this.tool(p)
-    if (!p?.alive || !bow?.arrow || !Number.isFinite(ang) || this.time < p.ready) return
+    if (!p?.alive || !bow?.arrow || !Number.isFinite(ang) || this.time < p.ready || this.swimming(p)) return
     const ammo = Object.keys(AMMO).find((k) => (p.inv[k] ?? 0) > 0)
     if (!ammo || !this.take(p, ammo, 1)) return
     p.ready = this.time + SHOOT_EVERY
     p.act = 'shoot'
     p.actAt = this.time
-    this.arrows.push({ x: p.x, y: p.y - 14, vx: Math.cos(ang) * ARROW_SPEED, vy: Math.sin(ang) * ARROW_SPEED, left: ARROW_RANGE, by: p.id, dmg: bow.arrow + AMMO[ammo] })
+    const k = DRAWN_MIN + (1 - DRAWN_MIN) * (Number.isFinite(power) ? Math.min(1, Math.max(0, power)) : 1)
+    this.arrows.push({ x: p.x, y: p.y - 14, vx: Math.cos(ang) * ARROW_SPEED, vy: Math.sin(ang) * ARROW_SPEED, left: bow.range * k, by: p.id, dmg: Math.round((bow.arrow + AMMO[ammo]) * k) })
   }
 
   // Une bête touchée (`how` : ce qui la touche, voir TOOLS) : ce qu'elle craint lui fait plus mal, et
@@ -1620,10 +2122,19 @@ class World {
     const p = this.players.get(id)
     const item = this.items.get(itemId)
     if (!p?.alive || !item || Math.hypot(item.x - p.x, item.y - p.y) > PICK_REACH) return false
-    this.remove(this.items, item.id)
     const kind = PICKS_AS[item.kind] ?? item.kind
-    this.give(p, kind, item.n)
-    this.news.push({ t: 'got', player: p.id, kind, n: item.n })
+    // Le sac plein : ce qui tient (le reste reste par terre).
+    const n = this.fit(p, kind, item.n)
+    if (!n) {
+      this.news.push({ t: 'fx', k: 'full', player: p.id, x: Math.round(p.x), y: Math.round(p.y) })
+      return false
+    }
+    if (n < item.n) {
+      item.n -= n
+      this.changed.items.add(item.id)
+    } else this.remove(this.items, item.id)
+    this.give(p, kind, n)
+    this.news.push({ t: 'got', player: p.id, kind, n })
     return true
   }
 
@@ -1646,10 +2157,10 @@ class World {
   // (0 : aucun ; sans poste demandé : 1). Un établi gagne un niveau par extension posée près de lui.
   station (p, at) {
     if (!at) return 1
-    if (at === 'fire') return [...this.fires.values()].some((f) => f.fuel > 0 && Math.hypot(f.x - p.x, f.y - p.y) <= STATION_REACH) ? 1 : 0
+    if (at === 'fire') return [...this.fires.values()].some((f) => f.fuel > 0 && Math.hypot(f.x - p.x, f.y - p.y) <= FIRE_REACH) ? 1 : 0
     let best = 0
     for (const s of this.pieces.values()) {
-      if (s.kind !== at || Math.hypot(s.x - p.x, s.y - p.y) > STATION_REACH) continue
+      if (s.kind !== at || !this.touching(p, s)) continue
       if (at === 'cauldron' && !this.heated(s)) continue
       const near = new Set([...this.pieces.values()].filter((e) => EXTENSIONS.includes(e.kind) && Math.hypot(e.x - s.x, e.y - s.y) <= EXTENSION_RANGE).map((e) => e.kind))
       best = Math.max(best, 1 + (at === 'workbench' ? near.size : 0))
@@ -1661,6 +2172,11 @@ class World {
   // Le chaudron posé sur ce feu, s'il y en a un.
   potOn (f) {
     return [...this.pieces.values()].find((s) => s.kind === 'cauldron' && Math.hypot(f.x - s.x, f.y - s.y) <= CAULDRON_FIRE) ?? null
+  }
+
+  // Le poste de cuisson posé sur ce feu, s'il y en a un.
+  spitOn (f) {
+    return [...this.pieces.values()].find((s) => s.kind === 'cookingstation' && Math.hypot(f.x - s.x, f.y - s.y) <= CAULDRON_FIRE) ?? null
   }
 
   // Le feu le plus proche de (x, y), à moins de tant (le chaudron se pose en visant le feu).
@@ -1682,7 +2198,12 @@ class World {
     const level = this.station(p, r.at)
     if (!level) return r.at
     if (level < (r.level ?? 1)) return 'level'
+    // (Payé d'abord : ce qu'on dépense libère peut-être la place.)
     this.pay(p, r.need)
+    if (this.fit(p, r.gives[0], r.gives[1]) < r.gives[1]) {
+      for (const [k, n] of Object.entries(r.need)) this.give(p, k, n)
+      return 'full'
+    }
     this.give(p, ...r.gives)
     this.news.push({ t: 'got', player: p.id, kind: r.gives[0], n: r.gives[1] })
     return null
@@ -1754,21 +2275,28 @@ class World {
       for (let i = tx; i < tx + piece.w; i++) {
         if (i < 0 || j < 0 || i >= SIDE || j >= SIDE) return 'blocked'
         const k = j * SIDE + i
-        if (WET.has(this.tiles[k]) || CRYPT_TILES.has(this.tiles[k])) return 'blocked'
+        // Ni sur une falaise, ni sur une rampe (on ne bouche pas un passage).
+        if (this.cliff[k] || this.relief[k] & RELIEF.ramp) return 'blocked'
+        if (piece.water ? !WET.has(this.tiles[k]) : WET.has(this.tiles[k]) || CRYPT_TILES.has(this.tiles[k])) return 'blocked'
         if (kind === 'till') {
           if (!SOIL.has(this.tiles[k]) || this.tilled.has(k) || this.cropAt.has(k) || this.solid.has(k) || this.flat.has(k)) return 'blocked'
-        } else if (kind === 'carrot') {
+        } else if (PLANTS[kind]?.tilled) {
           if (!this.tilled.has(k)) return 'untilled'
           if (this.cropAt.has(k) || this.solid.has(k) || this.flat.has(k)) return 'blocked'
-        } else if (piece.flat ? this.flat.has(k) || this.cropAt.has(k) : this.solid.has(k) || this.cropAt.has(k)) return 'blocked'
+        } else if (PLANTS[kind]) {
+          if (!SOIL.has(this.tiles[k]) || this.cropAt.has(k) || this.solid.has(k) || this.flat.has(k)) return 'blocked'
+          if (PLANTS[kind].tree && this.forest[k] !== (PLANTS[kind].wild ? 1 : 0)) return 'biome'
+        } else if (piece.cover ? this.covers.has(k) || this.solid.has(k) || this.cropAt.has(k) : piece.flat ? this.flat.has(k) || this.cropAt.has(k) : this.solid.has(k) || this.cropAt.has(k)) return 'blocked'
       }
     }
-    if (piece.flat) return null
+    if (piece.flat || piece.cover) return null
     const inside = (o, m) => o.x > x0 - m && o.x < x1 + m && o.y > y0 - m && o.y < y1 + m
     if (this.grid.trees.near(x, y, 40).some((t) => !t.stump && inside(t, 5))) return 'blocked'
-    if (kind === 'carrot' || kind === 'till') return null
+    // Une graine d'arbre : de la place autour (ni arbre, ni souche, ni autre pousse).
+    if (PLANTS[kind]?.tree && (this.grid.trees.near(x, y, SAPLING_ROOM + 10).some((t) => Math.hypot(t.x - x, t.y - TILE / 2 - y + TILE / 2) < SAPLING_ROOM) || [...this.crops.values()].some((c) => PLANTS[c.kind].tree && Math.hypot(c.x - x, c.y - y) < SAPLING_ROOM))) return 'blocked'
+    if (PLANTS[kind] || kind === 'till') return null
     if (this.grid.rocks.near(x, y, 50).some((k) => !k.gone && inside(k, 12))) return 'blocked'
-    if (this.grid.fires.near(x, y, 40).some((f) => inside(f, 8) && kind !== 'cauldron') || inside(this.altar, 40)) return 'blocked'
+    if (this.grid.fires.near(x, y, 40).some((f) => inside(f, 8) && !ON_FIRE.has(kind)) || inside(this.altar, 40)) return 'blocked'
     if (this.crypts.some((c) => inside({ x: c.x, y: c.y - CRYPT.h / 2 }, CRYPT.w + 4))) return 'blocked'
     if ([...this.players.values()].some((o) => o.alive && inside(o, 3)) || [...this.beasts.values()].some((b) => inside(b, 3))) return 'blocked'
     return null
@@ -1778,24 +2306,27 @@ class World {
   // pourquoi pas ('need', 'far', 'bench', 'blocked' ; 'tool' : planter sans cultivateur).
   place (id, kind, x, y, rot = 0) {
     const p = this.players.get(id)
-    if (!p?.alive || !Number.isFinite(x) || !Number.isFinite(y) || !(PIECES[kind] || kind === 'carrot' || kind === 'till' || BOATS[kind])) return 'none'
-    const need = PIECES[kind]?.need ?? (kind === 'carrot' ? { carrot: 1 } : {})
+    if (!p?.alive || !Number.isFinite(x) || !Number.isFinite(y) || !(PIECES[kind] || PLANTS[kind] || kind === 'till' || BOATS[kind])) return 'none'
+    const need = PIECES[kind]?.need ?? PLANTS[kind]?.need ?? {}
     // Il faut l'outil en main : le cultivateur pour la terre, le marteau pour le reste.
-    const farming = kind === 'carrot' || kind === 'till'
+    const farming = !!PLANTS[kind] || kind === 'till'
     if (farming && p.held !== 'cultivator') return 'tool'
     if (!farming && p.held !== 'hammer') return 'hammer'
     if (BOATS[kind]) return this.launch(p, x, y, kind)
     if (!this.has(p, need)) return 'need'
     if (!PIECES[kind]?.rots.includes(rot)) rot = 0
     const { w, h } = PIECES[kind] ? sized(PIECES[kind], rot) : { w: 1, h: 1 }
-    // Le chaudron, en visant un feu : posé dessus (sur sa case).
-    const fire = kind === 'cauldron' && this.fireAt(x, y)
+    // Le chaudron, le poste de cuisson, en visant un feu : posés dessus (sur sa case), un seul par feu ;
+    // le poste de cuisson ne va que là.
+    const fire = ON_FIRE.has(kind) && this.fireAt(x, y)
+    if (kind === 'cookingstation' && !fire) return 'fire'
+    if (fire && (this.potOn(fire) || this.spitOn(fire))) return 'blocked'
     const { tx, ty } = fire ? { tx: Math.floor(fire.x / TILE), ty: Math.floor(fire.y / TILE) } : World.corner(x, y, w, h)
     const why = this.fits(p, kind, tx, ty, rot)
     if (why) return why
     this.pay(p, need)
     if (kind === 'till') this.till(tx, ty)
-    else if (kind === 'carrot') this.addCrop(tx, ty, this.time)
+    else if (PLANTS[kind]) this.addCrop(tx, ty, this.time, kind)
     else this.addPiece(kind, tx, ty, { by: p.account, rot })
     return null
   }
@@ -1806,6 +2337,17 @@ class World {
     this.changed.tilled.add(ty * SIDE + tx)
   }
 
+  // Où une sorte de pièce prend ses cases : debout, à plat (le plancher), posée dessus (le tapis).
+  layer (def) {
+    return def.cover ? this.covers : def.flat ? this.flat : this.solid
+  }
+
+  // Le joueur est collé à cette pièce (à moins de TOUCH de son bord).
+  touching (p, piece) {
+    const [x0, y0, x1, y1] = [piece.tx * TILE, piece.ty * TILE, (piece.tx + piece.w) * TILE, (piece.ty + piece.h) * TILE]
+    return Math.hypot(Math.max(x0 - p.x, 0, p.x - x1), Math.max(y0 - p.y, 0, p.y - y1)) <= TOUCH
+  }
+
   addPiece (kind, tx, ty, extra = {}) {
     const def = PIECES[kind]
     const id = this.nextId++
@@ -1813,14 +2355,14 @@ class World {
     const { w, h } = sized(def, rot)
     const piece = { id, kind, tx, ty, w, h, x: (tx + w / 2) * TILE, y: (ty + h) * TILE, open: false, queue: [], by: null, name: '', store: {}, quality: {}, ...extra, rot }
     this.pieces.set(id, piece)
-    for (let j = ty; j < ty + h; j++) for (let i = tx; i < tx + w; i++) (def.flat ? this.flat : this.solid).set(j * SIDE + i, piece)
+    for (let j = ty; j < ty + h; j++) for (let i = tx; i < tx + w; i++) this.layer(def).set(j * SIDE + i, piece)
     this.changed.pieces.add(id)
     return piece
   }
 
-  addCrop (tx, ty, planted) {
+  addCrop (tx, ty, planted, kind = 'carrot') {
     const id = this.nextId++
-    const crop = { id, tx, ty, x: (tx + 0.5) * TILE, y: (ty + 1) * TILE - 2, planted, stage: 0 }
+    const crop = { id, kind, tx, ty, x: (tx + 0.5) * TILE, y: (ty + 1) * TILE - 2, planted, stage: 0 }
     crop.stage = this.stageOf(crop)
     this.crops.set(id, crop)
     this.cropAt.set(ty * SIDE + tx, crop)
@@ -1830,7 +2372,18 @@ class World {
 
   stageOf (crop) {
     const age = this.time - crop.planted
-    return age >= GROW ? 2 : age >= GROW / 2 ? 1 : 0
+    const grow = PLANTS[crop.kind].grow
+    return age >= grow ? 2 : age >= grow / 2 ? 1 : 0
+  }
+
+  // Un arbre né d'une graine (il se garde d'un redémarrage à l'autre : voir `snapshot`).
+  growTree (kind, x, y, stump = false) {
+    const id = this.nextId++
+    const tree = { id, kind, x: Math.round(x), y: Math.round(y), hp: stump ? STUMP_HP : TREES[kind].hp, stump, regrow: 0, grown: true }
+    this.trees.set(id, tree)
+    this.grid.trees.add(tree)
+    this.changed.grown.add(id)
+    return tree
   }
 
   // Démonter une construction ou un feu (on récupère tout ce qu'elle a coûté, et le minerai pas encore fondu) ou
@@ -1864,15 +2417,27 @@ class World {
     const it = piece ?? crop
     if (!p?.alive || !it || Math.hypot(it.x - p.x, it.y - p.y) > PIECE_REACH) return false
     if (crop) {
+      // Arrachée, elle rend ce qu'elle a coûté (une carotte mûre : sa récolte).
       this.cropAt.delete(crop.ty * SIDE + crop.tx)
       this.remove(this.crops, crop.id)
-      this.give(p, 'carrot', crop.stage === 2 ? HARVEST : 1)
+      const plant = PLANTS[crop.kind]
+      if (plant.once && crop.stage === 2) this.give(p, ...plant.gives)
+      else for (const [k, n] of Object.entries(plant.need)) this.give(p, k, n)
       return true
     }
-    // Ce qu'il y avait dans un coffre revient à qui le démonte.
-    for (const k of Object.keys(piece.store)) this.withdraw(p, piece, k)
+    // Ce qu'il y avait dans un coffre revient à qui le démonte ; la viande qui cuisait sur le poste de
+    // cuisson aussi (crue).
+    for (const k of Object.keys(piece.store)) this.withdraw(p, piece, k, undefined, true)
+    if (piece.kind === 'cookingstation') {
+      for (const f of this.fires.values()) {
+        if (this.spitOn(f) !== piece || !f.cooking.length) continue
+        this.give(p, 'meat', f.cooking.length)
+        f.cooking = []
+        this.changed.fires.add(f.id)
+      }
+    }
     const def = PIECES[piece.kind]
-    for (let j = piece.ty; j < piece.ty + piece.h; j++) for (let i = piece.tx; i < piece.tx + piece.w; i++) (def.flat ? this.flat : this.solid).delete(j * SIDE + i)
+    for (let j = piece.ty; j < piece.ty + piece.h; j++) for (let i = piece.tx; i < piece.tx + piece.w; i++) this.layer(def).delete(j * SIDE + i)
     this.remove(this.pieces, piece.id)
     for (const [k, n] of Object.entries(def.need)) this.give(p, k, n)
     for (const job of piece.queue) this.give(p, job.ore, 1)
@@ -1886,7 +2451,7 @@ class World {
   use (id, what) {
     const p = this.players.get(id)
     const piece = this.pieces.get(what)
-    if (!p?.alive || !piece || Math.hypot(piece.x - p.x, piece.y - TILE / 2 - p.y) > USE_REACH) return 'far'
+    if (!p?.alive || !piece || !this.touching(p, piece)) return 'far'
     if (piece.kind === 'door') {
       // Une double porte (deux portes accolées dans le même sens) s'ouvre et se ferme d'un coup ; pas de
       // porte qu'on referme sur quelqu'un.
@@ -1942,7 +2507,7 @@ class World {
   store (id, chestId, kind, n) {
     const p = this.players.get(id)
     const chest = this.pieces.get(chestId)
-    if (!p?.alive || chest?.kind !== 'chest' || Math.hypot(chest.x - p.x, chest.y - TILE / 2 - p.y) > USE_REACH) return 'far'
+    if (!p?.alive || chest?.kind !== 'chest' || !this.touching(p, chest)) return 'far'
     const have = p.inv[kind] ?? 0
     const k = Number.isInteger(n) && n > 0 ? Math.min(n, have) : have
     if (!k) return 'none'
@@ -1959,14 +2524,18 @@ class World {
   unstore (id, chestId, kind, n) {
     const p = this.players.get(id)
     const chest = this.pieces.get(chestId)
-    if (!p?.alive || chest?.kind !== 'chest' || Math.hypot(chest.x - p.x, chest.y - TILE / 2 - p.y) > USE_REACH) return 'far'
+    if (!p?.alive || chest?.kind !== 'chest' || !this.touching(p, chest)) return 'far'
     return this.withdraw(p, chest, kind, n)
   }
 
-  withdraw (p, chest, kind, n) {
+  // Reprendre d'un coffre (ce qui tient dans le sac) ; `spill` (le coffre démonté) : ce qui ne tient
+  // pas tombe par terre.
+  withdraw (p, chest, kind, n, spill = false) {
     const have = chest.store[kind] ?? 0
-    const k = Number.isInteger(n) && n > 0 ? Math.min(n, have) : have
-    if (!k) return 'none'
+    const want = Number.isInteger(n) && n > 0 ? Math.min(n, have) : have
+    const k = spill ? want : this.fit(p, kind, want)
+    if (!want) return 'none'
+    if (!k) return 'full'
     chest.store[kind] -= k
     const q = chest.quality[kind]
     if (q) p.quality[kind] = Math.max(p.quality[kind] ?? 1, q)
@@ -1974,7 +2543,9 @@ class World {
       delete chest.store[kind]
       delete chest.quality[kind]
     }
-    this.give(p, kind, k)
+    const keep = spill ? this.fit(p, kind, k) : k
+    if (keep) this.give(p, kind, keep)
+    if (k > keep) this.drop(kind, k - keep, chest.x, chest.y + 10)
     this.changed.pieces.add(chest.id)
     return null
   }
@@ -2033,22 +2604,30 @@ class World {
     return null
   }
 
-  // Récolter une carotte mûre.
+  // Récolter ce qui est mûr : la carotte s'arrache ; le buisson, les champignons repoussent.
   harvest (id, cropId) {
     const p = this.players.get(id)
     const crop = this.crops.get(cropId)
-    if (!p?.alive || !crop || crop.stage < 2 || Math.hypot(crop.x - p.x, crop.y - p.y) > PICK_REACH) return false
-    this.cropAt.delete(crop.ty * SIDE + crop.tx)
-    this.remove(this.crops, crop.id)
-    this.give(p, 'carrot', HARVEST)
-    this.news.push({ t: 'got', player: p.id, kind: 'carrot', n: HARVEST })
+    const plant = crop && PLANTS[crop.kind]
+    if (!p?.alive || !crop || !plant.gives || crop.stage < 2 || Math.hypot(crop.x - p.x, crop.y - p.y) > PICK_REACH) return false
+    const [kind, n] = plant.gives
+    if (plant.once) {
+      this.cropAt.delete(crop.ty * SIDE + crop.tx)
+      this.remove(this.crops, crop.id)
+    } else {
+      crop.planted = this.time - plant.grow / 2
+      crop.stage = this.stageOf(crop)
+      this.changed.crops.add(crop.id)
+    }
+    this.give(p, kind, n)
+    this.news.push({ t: 'got', player: p.id, kind, n })
     return true
   }
 
   nearFire (p, fireId) {
     const f = this.fires.get(fireId)
     // (Un chaudron dessus : on l'alimente d'aussi loin qu'on se sert du chaudron.)
-    return f && Math.hypot(f.x - p.x, f.y - p.y) <= (this.potOn(f) ? USE_REACH : FIRE_REACH) ? f : null
+    return f && Math.hypot(f.x - p.x, f.y - p.y) <= (this.potOn(f) || this.spitOn(f) ? USE_REACH : FIRE_REACH) ? f : null
   }
 
   // Une bûche de plus dans le feu (il se rallume s'il était éteint).
@@ -2061,12 +2640,12 @@ class World {
     return true
   }
 
-  // De la viande crue à cuire sur un feu allumé : cuite, elle tombe à côté (n'importe qui peut la prendre).
+  // De la viande crue à cuire, sur le poste de cuisson d'un feu allumé : cuite, elle tombe à côté
+  // (n'importe qui peut la prendre).
   cook (id, fireId) {
     const p = this.players.get(id)
     const f = p?.alive && this.nearFire(p, fireId)
-    // Un chaudron posé dessus : le feu ne sert plus qu'au chaudron.
-    if (!f || f.fuel <= 0 || f.cooking.length >= COOK_MAX || this.potOn(f) || !this.take(p, 'meat', 1)) return false
+    if (!f || f.fuel <= 0 || f.cooking.length >= COOK_MAX || !this.spitOn(f) || !this.take(p, 'meat', 1)) return false
     f.cooking.push(this.time + COOK_TIME)
     this.changed.fires.add(f.id)
     return true
@@ -2160,7 +2739,7 @@ class World {
     this.news.push({ t: 'fx', k: 'stun', id: b.id, x: Math.round(b.x), y: Math.round(b.y) })
   }
 
-  // Mort : comme dans Valheim, tout ce qu'il avait reste dans une tombe, là où il est tombé.
+  // Mort : tout ce qu'il avait reste dans une tombe, là où il est tombé.
   die (p, by) {
     p.hp = 0
     p.alive = false
@@ -2187,15 +2766,30 @@ class World {
     const tomb = this.tombs.get(tombId)
     if (!p?.alive || !tomb) return 'none'
     if (Math.hypot(tomb.x - p.x, tomb.y - p.y) > USE_REACH) return 'far'
-    for (const [kind, n] of Object.entries(tomb.inv)) {
+    // Ce qui tient dans le sac (les sortes qu'on a déjà, et les autres tant qu'il reste des cases) ; le
+    // reste attend dans la tombe.
+    for (const [kind, all] of Object.entries(tomb.inv)) {
+      // (Ce qu'il portait reprend sa place : pas dans le sac.)
+      const wearing = Object.values(tomb.worn).includes(kind) && !p.worn[WEAR[kind]?.slot]
+      const n = Math.min(all, (wearing ? 1 : 0) + this.fit(p, kind, all))
+      if (!n) continue
       p.inv[kind] = (p.inv[kind] ?? 0) + n
       const q = tomb.quality[kind] ?? 1
       if (q > this.quality(p, kind)) p.quality[kind] = q
+      if (n < all) {
+        tomb.inv[kind] -= n
+        continue
+      }
+      delete tomb.inv[kind]
+      if (!p.worn[WEAR[kind]?.slot] && Object.values(tomb.worn).includes(kind)) p.worn[WEAR[kind].slot] = kind
+      if (!p.held && tomb.held === kind) p.held = kind
     }
-    for (const [slot, kind] of Object.entries(tomb.worn)) if (!p.worn[slot] && p.inv[kind]) p.worn[slot] = kind
-    if (!p.held && tomb.held && p.inv[tomb.held]) p.held = tomb.held
-    this.remove(this.tombs, tomb.id)
     this.news.push({ t: 'inv', player: p.id })
+    if (Object.keys(tomb.inv).length) {
+      this.changed.tombs.add(tomb.id)
+      return 'full'
+    }
+    this.remove(this.tombs, tomb.id)
     this.news.push({ t: 'fx', k: 'loot', player: p.id, x: tomb.x, y: tomb.y })
     return null
   }
@@ -2265,13 +2859,18 @@ class World {
       this.drop(SMELTS[job.ore], 1, s.x + (this.random() - 0.5) * 16, s.y + 8)
       this.changed.pieces.add(s.id)
     }
-    // Les carottes poussent.
-    for (const c of this.crops.values()) {
+    // Ce qui est planté pousse ; une pousse d'arbre devenue grande : un arbre.
+    for (const c of [...this.crops.values()]) {
       const stage = this.stageOf(c)
-      if (stage !== c.stage) {
-        c.stage = stage
-        this.changed.crops.add(c.id)
+      if (stage === c.stage) continue
+      if (stage === 2 && PLANTS[c.kind].tree) {
+        this.cropAt.delete(c.ty * SIDE + c.tx)
+        this.remove(this.crops, c.id)
+        this.growTree(PLANTS[c.kind].tree, c.x, c.y + 2)
+        continue
       }
+      c.stage = stage
+      this.changed.crops.add(c.id)
     }
     // Ce qui revient (les rochers, pas le cuivre ; les arbres jamais) : pas sur la tête de quelqu'un.
     const free = (x, y) => ![...this.players.values()].some((p) => Math.hypot(p.x - x, p.y - y) < 18)
@@ -2374,6 +2973,105 @@ class World {
   }
 
   // Va vers `goal` à `speed` (glisse le long d'un obstacle). Renvoie false s'il est bloqué.
+  // La ligne droite de a à b est libre (on s'y tient debout tous les tant de pixels).
+  clear (a, b) {
+    const n = Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / 6)
+    for (let k = 1; k <= n; k++) if (!this.walkable(a.x + ((b.x - a.x) * k) / n, a.y + ((b.y - a.y) * k) / n)) return false
+    return true
+  }
+
+  // Où aller pour rejoindre `goal` : tout droit si rien ne gêne, sinon par un chemin case à case (une
+  // porte ouverte, le tour d'un mur), cherché à moins de PATH.reach cases et refait de temps en temps.
+  // Pas de chemin : tout droit quand même (elle glisse le long de l'obstacle, comme avant).
+  toward (b, goal) {
+    if (this.clear(b, goal)) {
+      b.path = null
+      return goal
+    }
+    const gx = Math.floor(goal.x / TILE)
+    const gy = Math.floor(goal.y / TILE)
+    const stale = !b.path || this.time - b.pathAt > PATH.every || Math.abs(b.pathGoal[0] - gx) + Math.abs(b.pathGoal[1] - gy) > 1
+    if (stale) {
+      b.path = this.route(b, goal)
+      b.pathAt = this.time
+      b.pathGoal = [gx, gy]
+    }
+    if (!b.path) return goal
+    // La prochaine étape, en sautant celles qu'on voit déjà au-delà.
+    while (b.path.length > 1 && (Math.hypot(b.path[0].x - b.x, b.path[0].y - b.y) < 6 || this.clear(b, b.path[1]))) b.path.shift()
+    if (b.path.length === 1 && Math.hypot(b.path[0].x - b.x, b.path[0].y - b.y) < 6) b.path = null
+    return b.path?.[0] ?? goal
+  }
+
+  // Le chemin de cases (A*, en huit directions, sans couper les coins) de la bête à `goal` : les milieux
+  // des cases, le dernier étant `goal` ; null s'il n'y en a pas assez près.
+  route (b, goal) {
+    const [bx, by] = [Math.floor(b.x / TILE), Math.floor(b.y / TILE)]
+    const [gx, gy] = [Math.floor(goal.x / TILE), Math.floor(goal.y / TILE)]
+    if (Math.max(Math.abs(gx - bx), Math.abs(gy - by)) > PATH.reach) return null
+    const free = new Map()
+    const open = (x, y) => {
+      if (Math.max(Math.abs(x - bx), Math.abs(y - by)) > PATH.reach) return false
+      if ((x === gx && y === gy) || (x === bx && y === by)) return true
+      const k = y * SIDE + x
+      if (!free.has(k)) free.set(k, this.walkable((x + 0.5) * TILE, (y + 0.5) * TILE))
+      return free.get(k)
+    }
+    const key = (x, y) => y * SIDE + x
+    const h = (x, y) => Math.max(Math.abs(x - gx), Math.abs(y - gy)) + 0.41 * Math.min(Math.abs(x - gx), Math.abs(y - gy))
+    const from = new Map([[key(bx, by), null]])
+    const cost = new Map([[key(bx, by), 0]])
+    // Un tas (les cases à voir, la moins chère d'abord).
+    const heap = [[h(bx, by), bx, by]]
+    const push = (e) => {
+      heap.push(e)
+      for (let i = heap.length - 1; i > 0;) {
+        const j = (i - 1) >> 1
+        if (heap[j][0] <= heap[i][0]) break
+        ;[heap[i], heap[j]] = [heap[j], heap[i]]
+        i = j
+      }
+    }
+    const pop = () => {
+      const top = heap[0]
+      const last = heap.pop()
+      if (heap.length) {
+        heap[0] = last
+        for (let i = 0; ;) {
+          const [l, r] = [i * 2 + 1, i * 2 + 2]
+          let m = i
+          if (l < heap.length && heap[l][0] < heap[m][0]) m = l
+          if (r < heap.length && heap[r][0] < heap[m][0]) m = r
+          if (m === i) break
+          ;[heap[i], heap[m]] = [heap[m], heap[i]]
+          i = m
+        }
+      }
+      return top
+    }
+    let seen = 0
+    while (heap.length && seen++ < PATH.nodes) {
+      const [, x, y] = pop()
+      if (x === gx && y === gy) {
+        const path = [{ x: goal.x, y: goal.y }]
+        for (let k = from.get(key(x, y)); k !== null && k !== key(bx, by); k = from.get(k)) path.unshift({ x: ((k % SIDE) + 0.5) * TILE, y: (Math.floor(k / SIDE) + 0.5) * TILE })
+        return path
+      }
+      const c = cost.get(key(x, y))
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+        const [nx, ny] = [x + dx, y + dy]
+        if (!open(nx, ny) || (dx && dy && (!open(x + dx, y) || !open(x, y + dy)))) continue
+        const nc = c + (dx && dy ? 1.41 : 1)
+        const k = key(nx, ny)
+        if (cost.has(k) && cost.get(k) <= nc) continue
+        cost.set(k, nc)
+        from.set(k, key(x, y))
+        push([nc + h(nx, ny), nx, ny])
+      }
+    }
+    return null
+  }
+
   go (b, goal, speed, dt) {
     const dx = goal.x - b.x
     const dy = goal.y - b.y
@@ -2518,8 +3216,10 @@ class World {
     if (kind.smash) return this.smash(b)
     const bite = kind.hostile ?? BITE
     const p = this.players.get(b.swing.target)
+    const thrown = b.swing.thrown
     b.swing = null
     b.bit = this.time
+    if (thrown) return p?.alive && this.hurl(b, p)
     if (kind.ranged) return p?.alive && this.loose(b, p)
     if (p?.alive && dist(p, b) < bite.reach + 8) this.damage(p, bite.dmg * this.might(b), b.kind, b)
   }
@@ -2529,6 +3229,13 @@ class World {
     const { ranged, hostile } = BEASTS[b.kind]
     const a = Math.atan2(p.y - 10 - (b.y - 14), p.x - b.x)
     this.arrows.push({ x: b.x, y: b.y - 14, vx: Math.cos(a) * ranged.speed, vy: Math.sin(a) * ranged.speed, left: ranged.range + 60, by: null, kind: b.kind, dmg: hostile.dmg * this.might(b), hostile: true })
+  }
+
+  // Le nain gris jette un caillou vers sa proie (là où elle est maintenant : en bougeant, on l'évite).
+  hurl (b, p) {
+    const thr = BEASTS[b.kind].hostile.throw
+    const a = Math.atan2(p.y - 10 - (b.y - 16), p.x - b.x)
+    this.arrows.push({ x: b.x, y: b.y - 16, vx: Math.cos(a) * thr.speed, vy: Math.sin(a) * thr.speed, left: thr.range, by: null, kind: b.kind, dmg: thr.dmg * this.might(b), hostile: true, stone: true })
   }
 
   // La massue tombe : qui est dessous est touché, les arbres autour tombent (même les bouleaux).
@@ -2550,18 +3257,23 @@ class World {
   // l'arrête), et touche une fois qui est sur son chemin.
   dash (b, dt) {
     const r = b.rush
-    const rush = BEASTS[b.kind].hostile.rush
+    const rush = BEASTS[b.kind].hostile?.rush ?? BEASTS[b.kind].charge
     b.vx = 0
     b.vy = 0
     if (this.time < r.at) return
-    if (this.time >= r.until) {
+    // L'élan fini (ou un obstacle) : la charge du sanglier le fait repartir un peu.
+    const done = () => {
       b.rush = null
+      if (rush.back) b.back = this.time + rush.back
+    }
+    if (this.time >= r.until) {
+      done()
       b.bit = this.time
       return
     }
     const [x, y] = [b.x + r.ux * rush.speed * dt, b.y + r.uy * rush.speed * dt]
     if (!this.walkable(x, y)) {
-      b.rush = null
+      done()
       return
     }
     Object.assign(b, { x, y, vx: r.ux * rush.speed, vy: r.uy * rush.speed })
@@ -2586,7 +3298,7 @@ class World {
     const p = this.players.get(id)
     const piece = this.pieces.get(what)
     if (!p?.alive || piece?.kind !== 'portal') return 'none'
-    if (Math.hypot(piece.x - p.x, piece.y - TILE / 2 - p.y) > USE_REACH) return 'far'
+    if (!this.touching(p, piece)) return 'far'
     piece.name = typeof text === 'string' ? text.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, PORTAL_NAME) : ''
     this.changed.pieces.add(piece.id)
     return null
@@ -2633,7 +3345,12 @@ class World {
       if (t >= b.until) b.state = 'idle'
       else {
         const from = b.flee ?? b
-        const a = Math.atan2(b.y - from.y, b.x - from.x) + Math.sin(t * 1.3 + b.id) * 0.4
+        // Elle file en zigzag : un écart de côté qui change toutes les secondes ou presque.
+        if (!(t < b.zigUntil)) {
+          b.zig = (this.random() < 0.5 ? -1 : 1) * (0.45 + this.random() * 0.5)
+          b.zigUntil = t + 0.6 + this.random() * 0.9
+        }
+        const a = Math.atan2(b.y - from.y, b.x - from.x) + b.zig + Math.sin(t * 2.1 + b.id) * 0.25
         goal = { x: b.x + Math.cos(a) * 100, y: b.y + Math.sin(a) * 100 }
         speed = kind.run
       }
@@ -2666,8 +3383,27 @@ class World {
       }
       // (Le premier jet, un instant après l'avoir vue.)
       b.tossAt ??= t + 0.5
-      const rush = kind.hostile?.rush
+      // Le caillou du nain gris : d'un peu loin, s'il la voit, le bras levé un instant.
+      const thr = kind.hostile?.throw
+      if (p?.alive && thr && away > thr.min && away < thr.max && t >= (b.throwAt ?? t + 0.3) && this.sees(b, p) && this.clear(b, p)) {
+        b.swing = { at: t + thr.windup, target: p.id, thrown: true }
+        b.throwAt = t + thr.every * (0.7 + this.random() * 0.6)
+        b.stomp = t
+        b.vx = 0
+        b.vy = 0
+        b.d = p.x < b.x ? 2 : 3
+        return
+      }
+      if (thr) b.throwAt ??= t + 0.3
+      const rush = kind.hostile?.rush ?? kind.charge
       const far = p && dist(p, b)
+      // Après sa charge, le sanglier s'éloigne (un peu de biais), puis revient.
+      if (p?.alive && b.back > t) {
+        const a = Math.atan2(b.y - p.y, b.x - p.x) + Math.sin(b.id) * 0.6
+        b.until = Math.max(b.until, t + 2)
+        if (!this.go(b, { x: b.x + Math.cos(a) * 60, y: b.y + Math.sin(a) * 60 }, kind.run * 0.8, dt)) b.back = t
+        return
+      }
       if (p?.alive && rush && far > rush.min && far < rush.max && t >= (b.rushAt ?? 0) && this.sees(b, p)) {
         // L'élan : elle se ramasse (on la voit venir), puis file tout droit vers où est sa proie.
         b.rush = { at: t + rush.windup, until: t + rush.windup + rush.time, ux: (p.x - b.x) / far, uy: (p.y - b.y) / far, hit: false }
@@ -2710,7 +3446,8 @@ class World {
           // Un arbre entre le troll et sa proie : il le renverse.
           this.windup(b, p)
         } else {
-          goal = p
+          // Un mur, des arbres entre elle et sa proie : elle cherche un chemin (une porte ouverte).
+          goal = this.toward(b, p)
           speed = kind.run
         }
       }
@@ -2757,8 +3494,7 @@ class World {
   }
 
   // Ce qui dure d'un redémarrage de floor à l'autre : les souches et les arbres arrachés (les arbres
-  // viennent de la graine), l'étain qui reste par terre,
-  // les rochers cassés, les buissons cueillis, les feux, les constructions et les carottes plantées.
+  // viennent de la graine), les rochers cassés, les buissons cueillis, les feux, les constructions et les carottes plantées.
   // Les temps sont gardés en secondes restantes (l'âge, pour une carotte).
   snapshot () {
     const left = (at) => Math.max(0, Math.round(at - this.time))
@@ -2768,13 +3504,12 @@ class World {
       stumps: [...this.trees.values()].filter((t) => t.stump).map((t) => [t.id]),
       uprooted: [...this.uprooted],
       clock: Math.round(this.clock()),
-      onceKinds: [...ONCE],
-      tin: [...this.items.values()].filter((i) => ONCE.has(i.kind) && i.wild).map((i) => [i.kind, i.x, i.y]),
       rocks: [...this.rocks.values()].filter((k) => k.gone).map((k) => [k.id, left(k.back)]),
       bushes: [...this.bushes.values()].filter((b) => !b.ripe).map((b) => [b.id, left(b.back)]),
       fires: [...this.fires.values()].map((f) => ({ x: f.x, y: f.y, fuel: Math.round(f.fuel), by: f.by })),
       pieces: [...this.pieces.values()].map((p) => ({ k: p.kind, tx: p.tx, ty: p.ty, rot: p.rot, open: p.open, by: p.by, name: p.name, ore: p.queue.map((j) => j.ore), store: p.store, quality: p.quality })),
-      crops: [...this.crops.values()].map((c) => [c.tx, c.ty, Math.round(this.time - c.planted)]),
+      crops: [...this.crops.values()].map((c) => [c.tx, c.ty, Math.round(this.time - c.planted), c.kind]),
+      grown: [...this.trees.values()].filter((t) => t.grown).map((t) => [t.kind, t.x, t.y, t.stump ? 1 : 0]),
       tilled: [...this.tilled],
       boats: [...this.boats.values()].map((b) => [Math.round(b.x), Math.round(b.y), b.d, b.kind]),
       tombs: [...this.tombs.values()].map((t) => ({ x: t.x, y: t.y, name: t.name, inv: t.inv, quality: t.quality, worn: t.worn, held: t.held }))
@@ -2796,12 +3531,6 @@ class World {
       }
       this.uprooted.add(id)
     }
-    // L'étain qui restait (le reste a été ramassé) : à la place de celui que la graine vient de poser.
-    if (state.tin) {
-      const kinds = new Set(state.onceKinds ?? ['tinore'])
-      for (const i of [...this.items.values()]) if (kinds.has(i.kind) && i.wild) this.items.delete(i.id)
-      for (const [kind, x, y] of state.tin) if (kinds.has(kind)) this.drop(kind, 1, x, y, { wild: true })
-    }
     for (const [id, left] of state.rocks ?? []) {
       const rock = this.rocks.get(id)
       if (rock) Object.assign(rock, { gone: true, back: this.time + left })
@@ -2822,10 +3551,12 @@ class World {
     }
     for (const k of state.tilled ?? []) if (Number.isInteger(k) && k >= 0 && k < SIDE * SIDE) this.tilled.add(k)
     // (Les carottes d'avant la terre retournée : elle l'est sous elles.)
-    for (const [tx, ty, age] of state.crops ?? []) {
-      this.addCrop(tx, ty, this.time - age)
-      this.tilled.add(ty * SIDE + tx)
+    for (const [tx, ty, age, kind = 'carrot'] of state.crops ?? []) {
+      if (!PLANTS[kind]) continue
+      this.addCrop(tx, ty, this.time - age, kind)
+      if (PLANTS[kind].tilled) this.tilled.add(ty * SIDE + tx)
     }
+    for (const [kind, x, y, stump] of state.grown ?? []) if (TREES[kind]) this.growTree(kind, x, y, !!stump)
     for (const [x, y, d, kind] of state.boats ?? []) this.addBoat(x, y, d, kind)
     for (const t of state.tombs ?? []) {
       const inv = clean(t.inv)
@@ -2862,6 +3593,7 @@ class World {
     const of = (set, map) => [...set].map((id) => map.get(id)).filter(Boolean)
     const out = {
       trees: of(c.trees, this.trees),
+      grown: of(c.grown, this.trees),
       rocks: of(c.rocks, this.rocks),
       bushes: of(c.bushes, this.bushes),
       items: of(c.items, this.items),
@@ -2878,4 +3610,4 @@ class World {
   }
 }
 
-module.exports = { World, VERSION, ISLANDS, DAY, NIGHT, RAIN, DRY, CRYPT, PROPS, SPIKES, SPAWNER, STARS, COMBAT, SPEAR, SHIELDED, BOAT, BOATS, CHEST_KINDS, SHIELDS, PARRY, STUN_TIME, CAULDRON_FIRE, TILE, SIDE, SIZE, T, RECIPES, BUILDS, PIECES, CHASE_MAX, UPGRADES, QUALITY_MAX, FOODS, WEAR, BEASTS, TREES, ROCKS, BOSS, BASE_HP, WALK, RUN, GROW, HARVEST, SMELT_TIME, USE_REACH, terrain, seeded, noise, absorb }
+module.exports = { World, PLANTS, SEEDS, RELIEF, CARRY, STACK, WEIGHT, stackOf, weightOf, cliffs, VERSION, ISLANDS, DAY, NIGHT, RAIN, DRY, CRYPT, PROPS, SPIKES, SPAWNER, STARS, COMBAT, SPEAR, SHIELDED, BOAT, BOATS, CHEST_KINDS, SHIELDS, PARRY, STUN_TIME, CAULDRON_FIRE, TILE, SIDE, SIZE, T, RECIPES, BUILDS, PIECES, CHASE_MAX, UPGRADES, QUALITY_MAX, FOODS, WEAR, BEASTS, TREES, ROCKS, BOSS, BASE_HP, WALK, RUN, GROW, HARVEST, SMELT_TIME, USE_REACH, terrain, seeded, noise, absorb }

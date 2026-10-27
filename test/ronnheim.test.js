@@ -20,14 +20,23 @@ function bare (seed = 1) {
 }
 
 // Un établi posé à côté du joueur (le bois en plus).
+// Le joueur juste devant une pièce (on ne s'en sert que collé à elle).
+function front (p, piece) {
+  Object.assign(p, { x: piece.x, y: piece.y + 6 })
+}
+
 function bench (world, p) {
   p.inv.hammer = 1
   p.held = 'hammer'
   p.inv.wood = (p.inv.wood ?? 0) + 10
-  for (const [dx, dy] of [[-40, -30], [40, -30], [-40, 30], [40, 30], [0, -40], [0, 40]]) {
+  // Collé au joueur (on ne se sert d'un poste que tout contre lui).
+  for (const [dx, dy] of [-6, -10, -14, -18, 6, 10, 14, 18].map((dy) => [0, dy]).concat([-22, 22].flatMap((dx) => [0, 4, 8, 12, 16].map((dy) => [dx, dy])))) {
     p.inv.hammer = 1
     p.held = 'hammer'
-    if (world.place(p.id, 'workbench', p.x + dx, p.y + dy) === null) return [...world.pieces.values()].find((x) => x.kind === 'workbench')
+    if (world.place(p.id, 'workbench', p.x + dx, p.y + dy) !== null) continue
+    const piece = [...world.pieces.values()].find((x) => x.kind === 'workbench')
+    if (world.touching(p, piece)) return piece
+    world.unbuild(p.id, piece.id)
   }
   throw new Error('pas de place pour l’établi')
 }
@@ -53,7 +62,7 @@ test('l’île : la même pour une graine, de l’eau sur les bords, le départ 
   // Un monde d'îles : plusieurs, la première au milieu (le départ), de la mer entre.
   assert.ok(world.islands.length >= ISLANDS.count[0])
   assert.ok(world.scale > 3, `${world.scale}`)
-  // Comme dans Valheim : pas de bouleau dans la forêt noire, des pins.
+  // Pas de bouleau dans la forêt noire, des pins.
   assert.ok([...world.trees.values()].filter((t) => t.kind === 'birch').every((t) => !world.wild(t.x, t.y)))
   assert.ok([...world.trees.values()].some((t) => t.kind === 'pine' && world.wild(t.x, t.y)))
   assert.ok([...world.beasts.values()].some((b) => b.kind === 'skeleton' && b.home === 'forest'))
@@ -224,6 +233,17 @@ test('le feu de camp : posé, il cuit la viande, qu’on mange ; il s’éteint,
   assert.ok(world.build(p.id, x + 30, y))
   assert.deepEqual(p.inv, { hammer: 1, wood: 1, meat: 3 })
   const fire = [...world.fires.values()][0]
+  // Pas à même le feu : sur un poste de cuisson posé dessus (il faut un établi).
+  assert.ok(!world.cook(p.id, fire.id))
+  world.addPiece('workbench', Math.floor(fire.x / TILE) - 6, Math.floor(fire.y / TILE) - 4)
+  p.inv.wood += 2
+  assert.equal(world.place(p.id, 'cookingstation', x + 60, y + 60), 'fire')
+  assert.equal(world.place(p.id, 'cookingstation', fire.x + 2, fire.y - 2), null)
+  assert.equal(world.place(p.id, 'cauldron', fire.x, fire.y), 'need')
+  p.inv.tin = 10
+  assert.equal(world.place(p.id, 'cauldron', fire.x, fire.y), 'blocked')
+  delete p.inv.tin
+  assert.ok(world.spitOn(fire))
   assert.ok(world.cook(p.id, fire.id))
   assert.ok(world.cook(p.id, fire.id))
   // Deux à la fois au plus.
@@ -252,7 +272,7 @@ test('le feu de camp : posé, il cuit la viande, qu’on mange ; il s’éteint,
   assert.ok(!world.walkable(fire.x + 2, fire.y))
 })
 
-test('bouger : trop vite ou dans l’eau, refusé ; ce qui dure se garde et revient', () => {
+test('bouger : trop vite, refusé ; dans l’eau, on nage ; ce qui dure se garde et revient', () => {
   const world = bare()
   const p = world.join('Dio')
   run(world, 0.1)
@@ -265,7 +285,9 @@ test('bouger : trop vite ou dans l’eau, refusé ; ce qui dure se garde et revi
   }
   Object.assign(p, { x: wet.x - 4, y: wet.y })
   run(world, 0.1)
-  assert.ok(!world.move(p.id, wet.x, wet.y, 3, 1))
+  assert.ok(world.move(p.id, wet.x, wet.y, 3, 1))
+  assert.ok(world.wadeable(p.x, p.y))
+  Object.assign(p, { x: world.spawn.x, y: world.spawn.y })
 
   const tree = [...world.trees.values()][3]
   tree.stump = true
@@ -444,7 +466,7 @@ test('les vêtements retiennent les coups ; la pioche casse les rochers, qui rev
   assert.equal(world.armor(p), 9)
   world.wear(p.id, 'ragpants')
   assert.equal(world.armor(p), 8)
-  // Comme dans Valheim : une armure forte face au coup le réduit au carré (9² / (4 × 8) ≈ 3).
+  // Une armure forte face au coup le réduit au carré (9² / (4 × 8) ≈ 3).
   world.damage(p, 9)
   assert.equal(p.hp, BASE_HP - 3)
   world.damage(p, 12)
@@ -542,7 +564,11 @@ test('la forêt noire : autour de la prairie, des sapins, des myrtilles, du cuiv
   assert.ok(beasts.filter((b) => b.kind === 'greydwarf' || b.kind === 'troll').every((b) => world.wild(b.x, b.y)))
   assert.ok(beasts.filter((b) => b.kind === 'greyling' || b.kind === 'deer').every((b) => !world.wild(b.x, b.y)))
   assert.ok([...world.items.values()].filter((i) => i.kind === 'wildcarrot').every((i) => world.tile(i.x, i.y) === T.forest))
-  assert.ok([...world.items.values()].some((i) => i.kind === 'tinore'))
+  // L'étain : des gisements au bord de l'eau, dans la forêt noire.
+  const tins = [...world.rocks.values()].filter((k) => k.kind === 'tin')
+  assert.ok(tins.length > 5, `${tins.length} gisements d'étain`)
+  assert.ok(tins.every((k) => world.wild(k.x, k.y) && world.dry(k.x, k.y)))
+  assert.ok(tins.every((k) => [0, 1, 2, 3, 4, 5, 6, 7].some((a) => !world.dry(k.x + Math.cos(a * Math.PI / 4) * 40, k.y + Math.sin(a * Math.PI / 4) * 40) || !world.dry(k.x + Math.cos(a * Math.PI / 4) * 20, k.y + Math.sin(a * Math.PI / 4) * 20))))
 })
 
 test('le griset fonce sur qui passe, mord, et laisse de la résine : de quoi faire une torche', () => {
@@ -637,8 +663,10 @@ test('le bronze à la forge : l’armure (casque, plastron, jambières), l’ép
   const p = world.join('Dio')
   bench(world, p)
   const b = [...world.pieces.values()].find((q) => q.kind === 'workbench')
-  world.addPiece('forge', b.tx, b.ty + 3)
+  // La forge en face de l'établi : le joueur entre les deux, collé à chacun.
+  world.addPiece('forge', b.tx, b.ty + 2)
   world.addPiece('choppingblock', b.tx + 3, b.ty)
+  front(p, b)
   Object.assign(p.inv, { bronze: 80, wood: 20, leather: 20, hide: 20, bonefragments: 7 })
   for (const k of ['bronzehelmet', 'bronzeplate', 'bronzegreaves', 'bronzesword', 'bronzemace', 'bronzebuckler', 'bronzepickaxe', 'cultivator', 'bronzenails', 'ragtunic', 'leatherhelmet', 'deercape']) assert.equal(world.craft(p.id, k), null, k)
   assert.equal(p.inv.bronzenails, 10)
@@ -840,6 +868,9 @@ test('la base : un établi d’abord, des murs qui arrêtent, une porte qui s’
   assert.ok(!world.walkable(wx, y + 32 - 4))
   const door = [...world.pieces.values()].find((q) => q.kind === 'door')
   assert.ok(!world.walkable(door.x, door.y - 4))
+  // Trop loin de la porte : on ne l'ouvre pas ; tout contre, si.
+  assert.equal(world.use(p.id, door.id), 'far')
+  Object.assign(p, { x: door.x - 14, y: door.y - 8 })
   assert.equal(world.use(p.id, door.id), null)
   assert.ok(world.walkable(door.x, door.y - 4))
   // Un plancher sous ses pieds : on marche dessus.
@@ -921,6 +952,7 @@ test('les carottes : sauvages dans la forêt, plantées elles poussent, mûres o
   const fire = [...world.fires.values()][0]
   const pot = world.addPiece('cauldron', Math.floor(fire.x / TILE), Math.floor((fire.y - 8) / TILE) - 1)
   assert.ok(world.heated(pot))
+  front(p, pot)
   assert.equal(world.craft(p.id, 'carrotsoup'), null)
   assert.equal(world.eat(p.id, 'carrotsoup'), null)
   assert.equal(world.eat(p.id, 'carrot'), null)
@@ -953,12 +985,13 @@ test('le bronze : cuivre et étain fondus, alliés à la forge ; seule la hache 
   // La fonderie et la forge, près d'un établi, au départ.
   const { x, y } = world.spawn
   Object.assign(p, { x, y })
-  Object.assign(p.inv, { wood: 100, stone: 40, copperore: 4, tinore: 2 })
+  Object.assign(p.inv, { wood: 100, stone: 40, surtlingcore: 5, copperore: 4, tinore: 2 })
   p.inv.hammer = 1
   p.held = 'hammer'
   assert.equal(world.place(p.id, 'workbench', x - 40, y - 30), null)
   assert.equal(world.place(p.id, 'smelter', x + 40, y - 30), null)
   const smelter = [...world.pieces.values()].find((q) => q.kind === 'smelter')
+  front(p, smelter)
   for (let k = 0; k < 6; k++) assert.equal(world.use(p.id, smelter.id), null)
   assert.equal(world.use(p.id, smelter.id), 'ore')
   run(world, 6 * 12 + 1)
@@ -968,6 +1001,7 @@ test('le bronze : cuivre et étain fondus, alliés à la forge ; seule la hache 
   Object.assign(p.inv, { copper: 16 + 6, tin: 8, leather: 2 })
   assert.equal(world.craft(p.id, 'bronze'), 'forge')
   assert.equal(world.place(p.id, 'forge', x, y + 40), null)
+  front(p, [...world.pieces.values()].find((q) => q.kind === 'forge'))
   for (let k = 0; k < 8; k++) assert.equal(world.craft(p.id, 'bronze'), null)
   assert.equal(world.craft(p.id, 'bronzeaxe'), null)
   // Elle abat le bouleau : du bois fin.
@@ -1152,18 +1186,18 @@ test('le feu de camp se démonte ; le cuivre et l’étain ne reviennent pas', (
   world.crush(copper)
   run(world, 60 * 60)
   assert.ok(copper.gone)
-  // L'étain ramassé ne revient pas, même après un redémarrage.
+  // L'étain aussi, même après un redémarrage ; et il donne son minerai.
   const full = new World({ seed: 1, random: seeded(7) })
-  const tin = () => [...full.items.values()].filter((i) => i.kind === 'tinore' && i.wild)
-  const before = tin().length
-  assert.ok(before > 0)
-  full.items.delete(tin()[0].id)
-  full.litterAt = 0
-  run(full, 1)
-  assert.equal(tin().length, before - 1)
+  const tin = [...full.rocks.values()].find((k) => k.kind === 'tin')
+  full.crush(tin)
+  assert.equal([...full.items.values()].filter((i) => i.kind === 'tinore').length, 3)
+  run(full, 60 * 60)
+  assert.ok(tin.gone)
   const again = new World({ seed: 1, random: seeded(7) })
   again.restore(JSON.parse(JSON.stringify(full.snapshot())))
-  assert.equal([...again.items.values()].filter((i) => i.kind === 'tinore' && i.wild).length, before - 1)
+  assert.ok(again.rocks.get(tin.id).gone)
+  // Ni étain ni cœur de surtling par terre dans la nature (les cœurs, seulement dans les cryptes).
+  assert.ok(![...again.items.values()].some((i) => i.wild && (i.kind === 'tinore' || i.kind === 'surtlingcore')))
 })
 
 test('le jour et la nuit : l’heure tourne, et se garde', () => {
@@ -1206,7 +1240,7 @@ test('le lit : de jour on y reviendra ; la nuit on s’y endort, et quand tous d
   }
   assert.ok(bed)
   // Devant le lit, là où l'on peut marcher.
-  const spots = [[0, 14], [0, -40], [36, -8], [-36, -8]].map(([dx, dy]) => ({ x: bed.x + dx, y: bed.y + dy })).filter((s) => world.walkable(s.x, s.y) && world.walkable(s.x, s.y + 5))
+  const spots = [[bed.x, bed.y + 6], [bed.x, bed.ty * TILE - 6], [bed.tx * TILE - 6, bed.y - 8], [(bed.tx + bed.w) * TILE + 6, bed.y - 8]].map(([x, y]) => ({ x, y })).filter((s) => world.walkable(s.x, s.y) && world.walkable(s.x, s.y + 5))
   Object.assign(p, spots[0])
   Object.assign(q, spots[1] ?? spots[0])
   // De jour : pas de sommeil.
@@ -1544,7 +1578,7 @@ test('la roulade : rien ne porte un instant ; la lance se lance, et retombe', ()
   assert.equal(world.quality(p, 'spear'), 2)
 })
 
-test('les bêtes varient : le squelette au bouclier pare de face, le nain gris bondit, le troll jette des rochers', () => {
+test('les bêtes varient : le squelette au bouclier pare de face, le nain gris jette des cailloux, le troll des rochers', () => {
   const world = bare()
   const p = world.join('Dio')
   p.d = 3
@@ -1560,16 +1594,23 @@ test('les bêtes varient : le squelette au bouclier pare de face, le nain gris b
   assert.ok(world.time < bones.stun)
   world.beasts.clear()
 
-  // Le nain gris : un peu loin, il se ramasse, puis bondit et mord.
-  const at = world.freeSpot(0, 2000, (x, y) => [...Array(10).keys()].every((k) => world.walkable(x + k * 10, y) && !world.grid.trees.near(x + k * 10, y, 30).some((t) => !t.stump)))
+  // Le nain gris : un peu loin, il ne bondit pas, il lève le bras et jette un caillou, qui touche.
+  const at = world.freeSpot(0, 2000, (x, y) => [...Array(16).keys()].every((k) => world.walkable(x + k * 10, y) && !world.grid.trees.near(x + k * 10, y, 30).some((t) => !t.stump)))
   Object.assign(p, at, { hp: 25 })
-  const dwarf = world.spawnBeast('greydwarf', at.x + 80, at.y, 1000, null, 0)
+  const dwarf = world.spawnBeast('greydwarf', at.x + 120, at.y, 1000, null, 0)
   world.enrage(dwarf, p)
-  run(world, 0.1)
-  assert.ok(dwarf.rush, 'il se ramasse')
-  run(world, 0.8)
-  assert.ok(dwarf.x < at.x + 50, `${dwarf.x - at.x}`)
-  assert.ok(p.hp < 25)
+  let thrown = false
+  for (let k = 0; k < 40 && !thrown; k++) {
+    world.step(0.05)
+    thrown = world.arrows.some((a) => a.stone)
+    assert.ok(!dwarf.rush, 'pas d’élan')
+  }
+  assert.ok(thrown, 'un caillou')
+  // Il vole jusqu'au joueur (qui ne bouge pas) et le touche.
+  dwarf.throwAt = Infinity
+  dwarf.state = 'idle'
+  run(world, 1.5)
+  assert.ok(p.hp < 25, `${p.hp}`)
   world.beasts.clear()
 
   // Le troll, de plus loin, jette un rocher : l'endroit se voit, il y tombe deux secondes après.
@@ -1640,7 +1681,7 @@ test('la double porte : deux portes accolées dans le même sens s’ouvrent et 
   const a = world.addPiece('door', tx, ty)
   const b = world.addPiece('door', tx + 1, ty)
   const lone = world.addPiece('door', tx + 4, ty, { rot: 1 })
-  Object.assign(p, { x: a.x, y: a.y + 10 })
+  Object.assign(p, { x: a.x, y: a.y + 6 })
   assert.equal(world.use(p.id, a.id), null)
   assert.ok(a.open && b.open && !lone.open)
   assert.equal(world.use(p.id, b.id), null)
@@ -1648,7 +1689,7 @@ test('la double porte : deux portes accolées dans le même sens s’ouvrent et 
   assert.equal(world.twin(lone), null)
 })
 
-test('le chaudron se pose en visant le feu ; dessus, le feu ne cuit plus de viande', () => {
+test('le chaudron se pose en visant le feu ; dessus, pas de poste de cuisson ni de viande', () => {
   const world = bare()
   const p = world.join('Dio')
   Object.assign(p, world.spawn)
@@ -1666,15 +1707,36 @@ test('le chaudron se pose en visant le feu ; dessus, le feu ne cuit plus de vian
   // Le feu est sur la grille : au milieu de sa case.
   assert.equal(fire.x % TILE, TILE / 2)
   Object.assign(p, { x: fire.x + 20, y: fire.y })
-  // Sans chaudron, la viande cuit.
-  assert.ok(world.cook(p.id, fire.id))
+  // À même le feu, la viande ne cuit pas.
+  assert.ok(!world.cook(p.id, fire.id))
   // On vise le feu : le chaudron y va (sur sa case), et chauffe.
   assert.equal(world.place(p.id, 'cauldron', fire.x + 3, fire.y - 2), null)
   const pot = [...world.pieces.values()].find((x) => x.kind === 'cauldron')
   assert.equal(pot.tx, Math.floor(fire.x / TILE))
   assert.ok(world.heated(pot))
-  // Le feu ne cuit plus de viande.
+  // Le feu ne cuit plus de viande, et le poste de cuisson n'y va plus.
   assert.equal(world.cook(p.id, fire.id), false)
+  p.inv.wood = 2
+  assert.equal(world.place(p.id, 'cookingstation', fire.x, fire.y), 'blocked')
+})
+
+test('le poste de cuisson : démonté, il rend la viande qui cuisait (crue)', () => {
+  const world = bare()
+  const p = world.join('Dio')
+  Object.assign(p, world.spawn)
+  bench(world, p)
+  Object.assign(p.inv, { stone: 5, wood: 4, hammer: 1, meat: 2 })
+  p.held = 'hammer'
+  assert.ok([[0, 40], [40, 0], [-40, 0], [0, -40]].some(([dx, dy]) => world.build(p.id, p.x + dx, p.y + dy)))
+  const fire = [...world.fires.values()][0]
+  Object.assign(p, { x: fire.x + 20, y: fire.y })
+  assert.equal(world.place(p.id, 'cookingstation', fire.x, fire.y), null)
+  const spit = world.spitOn(fire)
+  assert.ok(world.cook(p.id, fire.id) && world.cook(p.id, fire.id))
+  assert.equal(p.inv.meat, undefined)
+  assert.ok(world.unbuild(p.id, spit.id))
+  assert.equal(p.inv.meat, 2)
+  assert.equal(fire.cooking.length, 0)
 })
 
 test('le radeau : du bois, du cuir, de la résine, posé sur l’eau près d’un établi ; il se garde et se démonte', () => {
@@ -1686,7 +1748,9 @@ test('le radeau : du bois, du cuir, de la résine, posé sur l’eau près d’u
     for (let a = 0; a < Math.PI * 2 && !shore; a += 0.2) {
       const x = world.spawn.x + Math.cos(a) * r
       const y = world.spawn.y + Math.sin(a) * r
-      if (world.walkable(x, y) && world.sailable(x + 50, y) && world.sailable(x + 60, y)) shore = { x, y }
+      // De la terre derrière soi (pour l'établi), l'eau devant.
+      const land = [[-40, 0], [-40, -20], [-20, -20], [0, -20]].every(([dx, dy]) => world.walkable(x + dx, y + dy))
+      if (land && world.walkable(x, y) && world.sailable(x + 50, y) && world.sailable(x + 60, y)) shore = { x, y }
     }
   }
   assert.ok(shore)
@@ -1707,4 +1771,295 @@ test('le radeau : du bois, du cuir, de la résine, posé sur l’eau près d’u
   assert.equal([...again.boats.values()][0].kind, 'raft')
   assert.ok(world.unbuild(p.id, raft.id))
   assert.deepEqual([p.inv.wood, p.inv.leather, p.inv.resin], [20, 6, 6])
+})
+
+test('l’eau : près de la rive, on patauge (sans se noyer) ; au large, on nage (pas d’arme), à bout de souffle on se noie ; un pont s’y pose, on y marche', () => {
+  const world = bare()
+  const p = world.join('Dio')
+  // De la rive vers le large : de la terre, deux cases d'eau peu profonde, puis l'eau profonde.
+  const river = []
+  for (let i = 0; i < SIDE * SIDE && !river.length; i += 7) {
+    const [tx, ty] = [i % SIDE, Math.floor(i / SIDE)]
+    if (world.tiles[i] !== T.deep || tx < 4 || ty < 3 || tx > SIDE - 4 || ty > SIDE - 4) continue
+    if (world.tiles[i - 1] === T.water && world.tiles[i - 2] === T.water && world.walkable((tx - 2.5) * TILE, (ty + 0.5) * TILE)) river.push([tx, ty])
+  }
+  assert.ok(river.length)
+  const [tx, ty] = river[0]
+  const [wx, wy] = [(tx + 0.5) * TILE, (ty + 0.5) * TILE]
+  // Au bord, on patauge : ni nage, ni noyade.
+  Object.assign(p, { x: wx - 16 * 2, y: wy })
+  assert.ok(world.wadeable(p.x, p.y) && !world.swimming(p))
+  assert.ok(!world.drown(p.id))
+  // Plus loin, on nage.
+  p.moved = world.time - 1
+  assert.ok(world.move(p.id, wx, wy, 3, 1))
+  assert.ok(world.swimming(p))
+  assert.ok(!world.walkable(wx, wy))
+  // À bout d'endurance : la vie s'en va, une fois par seconde.
+  const hp = p.hp
+  assert.ok(world.drown(p.id))
+  assert.ok(!world.drown(p.id))
+  assert.equal(p.hp, hp - 5)
+  // Pas de coup à la nage.
+  const ready = p.ready
+  world.hit(p.id)
+  assert.equal(p.act ?? null, null)
+  assert.equal(p.ready, ready)
+  // Un pont : sur l'eau, près d'un établi ; on y marche, on n'y nage plus.
+  Object.assign(p, { x: wx - 16 * 2, y: wy })
+  world.addPiece('workbench', tx - 6, ty - 2)
+  Object.assign(p.inv, { wood: 10, hammer: 1 })
+  p.held = 'hammer'
+  assert.equal(world.place(p.id, 'bridge', wx, wy), null)
+  assert.ok(world.walkable(wx, wy))
+  Object.assign(p, { x: wx, y: wy })
+  assert.ok(!world.swimming(p))
+  assert.ok(!world.drown(p.id))
+  // Pas de pont sur la terre.
+  assert.equal(world.place(p.id, 'bridge', wx - 16 * 3, wy), 'blocked')
+})
+
+test('une bête en chasse cherche son chemin : elle fait le tour de la maison et entre par la porte ouverte (fermée, non)', () => {
+  for (const open of [true, false]) {
+    const world = bare()
+    const p = world.join('Dio')
+    // Une maison de 7 × 7 cases autour du joueur, la porte au milieu du bas.
+    const [cx, cy] = [Math.floor(world.spawn.x / TILE), Math.floor(world.spawn.y / TILE)]
+    for (let i = -3; i <= 3; i++) {
+      for (const [x, y] of [[cx + i, cy - 3], [cx + i, cy + 3], [cx - 3, cy + i], [cx + 3, cy + i]]) {
+        if (x === cx && y === cy + 3) world.addPiece('door', x, y, { open })
+        else if (!world.solid.has(y * SIDE + x)) world.addPiece('wall', x, y)
+      }
+    }
+    Object.assign(p, { x: (cx + 0.5) * TILE, y: (cy + 0.5) * TILE, hp: 1e9 })
+    // Le squelette au nord, derrière le mur du haut.
+    const b = world.spawnBeast('skeleton', (cx + 0.5) * TILE, (cy - 7) * TILE, 1e6, 'meadow')
+    world.enrage(b, p)
+    let reached = false
+    for (let k = 0; k < 20 * 30 && !reached; k++) {
+      world.step(0.05)
+      b.until = world.time + 10
+      reached = Math.hypot(b.x - p.x, b.y - p.y) < 30
+    }
+    assert.equal(reached, open, open ? 'par la porte ouverte' : 'la porte fermée')
+  }
+})
+
+test('le sanglier blessé charge, repart un peu, et revient à l’assaut', () => {
+  const world = bare()
+  const p = world.join('Dio')
+  Object.assign(p, { x: world.spawn.x, y: world.spawn.y, hp: 1e9 })
+  const b = world.spawnBeast('boar', p.x + 90, p.y, 1e6, 'meadow')
+  world.enrage(b, p)
+  const hits = []
+  let rushes = 0
+  let backed = 0
+  let far = 0
+  let was = false
+  for (let k = 0; k < 20 * 15; k++) {
+    const hp = p.hp
+    world.step(0.05)
+    b.until = world.time + 10
+    if (p.hp < hp) hits.push(world.time)
+    if (b.rush && !was) rushes++
+    was = !!b.rush
+    if (b.back > world.time) {
+      backed++
+      far = Math.max(far, Math.hypot(b.x - p.x, b.y - p.y))
+    }
+  }
+  assert.ok(rushes >= 2, `${rushes} charges`)
+  assert.ok(backed > 10, 'il repart après sa charge')
+  assert.ok(far > 50, `il s'éloigne (${Math.round(far)})`)
+  assert.ok(hits.length >= 2, `${hits.length} coups`)
+})
+
+test('les graines : une souche arrachée en laisse parfois ; plantée, une pousse devient un arbre ; les buissons et les champignons plantés repoussent', () => {
+  const { PLANTS } = require('../src/ronnheim/world')
+  const world = bare()
+  const p = world.join('Dio')
+  // Les souches : sur beaucoup, des graines de leur arbre.
+  const beeches = [...world.trees.values()].filter((t) => t.kind === 'beech').slice(0, 40)
+  for (const t of beeches) world.uproot(t)
+  const seeds = [...world.items.values()].filter((i) => i.kind === 'beechseeds').length
+  assert.ok(seeds > 5 && seeds < 30, `${seeds} graines`)
+  // Dans la prairie, au cultivateur : une pousse ; dans la forêt noire, non (le hêtre n'y pousse pas).
+  // (Un coin de prairie à plat : ni falaise ni rampe autour.)
+  const flat = (x, y) => [-64, -48, -32, -16, 0, 16, 32, 48, 64].every((dx) => [-32, -16, 0, 16, 32].every((dy) => !world.steep(x + dx, y + dy)))
+  const spot = world.freeSpot(0, 8000, (x, y) => !world.wild(x, y) && [0, -48].every((dx) => [T.grass, T.dark, T.light].includes(world.tile(x + dx, y))) && !world.grid.trees.near(x, y, 60).length && Math.hypot(x - world.spawn.x, y - world.spawn.y) > 200 && flat(x, y))
+  Object.assign(p, { x: spot.x, y: spot.y + 30 })
+  Object.assign(p.inv, { beechseeds: 2, firecone: 1, cultivator: 1, raspberry: 10 })
+  p.held = 'cultivator'
+  assert.equal(world.place(p.id, 'beechseeds', spot.x, spot.y), null)
+  const sprout = [...world.crops.values()].find((c) => c.kind === 'beechseeds')
+  assert.ok(sprout)
+  assert.equal(world.place(p.id, 'beechseeds', spot.x + 8, spot.y), 'blocked', 'trop près de la pousse')
+  assert.equal(world.place(p.id, 'firecone', spot.x - 48, spot.y), 'biome')
+  // Un framboisier, à côté.
+  assert.equal(world.place(p.id, 'raspberrybush', spot.x - 48, spot.y), null)
+  const bush = [...world.crops.values()].find((c) => c.kind === 'raspberrybush')
+  assert.ok(!world.harvest(p.id, bush.id), 'pas encore mûr')
+  // Le temps passe : la pousse est un arbre (qui se garde), le framboisier se cueille, et repousse.
+  const trees = world.trees.size
+  world.time += PLANTS.beechseeds.grow + 1
+  world.step(0.05)
+  assert.equal(world.trees.size, trees + 1)
+  assert.ok(!world.crops.has(sprout.id))
+  const tree = [...world.trees.values()].find((t) => t.grown)
+  assert.equal(tree.kind, 'beech')
+  assert.ok(world.changes().grown.some((t) => t.id === tree.id))
+  Object.assign(p, { x: bush.x + 10, y: bush.y })
+  assert.ok(world.harvest(p.id, bush.id))
+  assert.equal(p.inv.raspberry, 3)
+  assert.ok(world.crops.has(bush.id) && bush.stage < 2, 'il repousse')
+  assert.ok(!world.harvest(p.id, bush.id))
+  world.time += PLANTS.raspberrybush.grow / 2 + 1
+  world.step(0.05)
+  assert.ok(world.harvest(p.id, bush.id))
+  // Au redémarrage : l'arbre et le framboisier sont là.
+  const again = new World({ seed: 1, random: seeded(7) })
+  again.restore(JSON.parse(JSON.stringify(world.snapshot())))
+  assert.ok([...again.trees.values()].some((t) => t.grown && t.x === tree.x && t.y === tree.y))
+  assert.ok([...again.crops.values()].some((c) => c.kind === 'raspberrybush' && c.tx === bush.tx))
+})
+
+test('le relief : des paliers, des falaises qu’on ne traverse pas, et toujours un passage (une rampe) jusqu’au bord de l’eau', () => {
+  const { RELIEF } = require('../src/ronnheim/world')
+  for (const seed of [3, 23, 58]) {
+    const world = new World({ seed, random: seeded(1) })
+    const { relief, cliff, tiles } = world
+    const n = SIDE * SIDE
+    const counts = [0, 0, 0, 0]
+    let ramps = 0
+    for (let i = 0; i < n; i++) {
+      if (tiles[i] === T.water || tiles[i] === T.deep) continue
+      counts[relief[i] & ~RELIEF.ramp]++
+      if (relief[i] & RELIEF.ramp) ramps++
+    }
+    assert.ok(counts.slice(1).every((c) => c > 1000), `${counts}`)
+    assert.ok(ramps > 50, `${ramps} rampes`)
+    // Une falaise ne se traverse pas ; le départ est sur la plaine.
+    const c = cliff.indexOf(1)
+    assert.ok(!world.walkable(((c % SIDE) + 0.5) * TILE, (Math.floor(c / SIDE) + 0.5) * TILE))
+    assert.equal(relief[world.cell(world.spawn.x, world.spawn.y)], 0)
+    // De chaque case où l'on marche, on rejoint le palier 0 (à pied, sans nager).
+    const walk = (i) => tiles[i] !== T.water && tiles[i] !== T.deep && !cliff[i]
+    const reach = new Uint8Array(n)
+    const queue = []
+    for (let i = 0; i < n; i++) if (walk(i) && (relief[i] & ~RELIEF.ramp) === 0) { reach[i] = 1; queue.push(i) }
+    for (let k = 0; k < queue.length; k++) {
+      const i = queue[k]
+      const x = i % SIDE
+      for (const j of [x > 0 ? i - 1 : -1, x < SIDE - 1 ? i + 1 : -1, i - SIDE, i + SIDE]) {
+        if (j >= 0 && j < n && !reach[j] && walk(j)) { reach[j] = 1; queue.push(j) }
+      }
+    }
+    let lost = 0
+    for (let i = 0; i < n; i++) if (walk(i) && !reach[i]) lost++
+    assert.equal(lost, 0, `graine ${seed} : ${lost} cases enfermées`)
+  }
+})
+
+test('on saute une falaise en descendant, pas en montant ; pas par-dessus deux paliers d’un coup s’il y a du plat entre', () => {
+  const world = bare()
+  const p = world.join('Dio')
+  const { relief, cliff } = world
+  // Une falaise au sud d'un palier : en haut, la case au nord ; en bas, la case au sud.
+  let spot = null
+  for (let i = SIDE * 10; i < SIDE * (SIDE - 10) && !spot; i++) {
+    if (!cliff[i] || relief[i] & 8) continue
+    const [up, down] = [i - SIDE, i + SIDE]
+    const x = ((i % SIDE) + 0.5) * TILE
+    const y = (Math.floor(i / SIDE) + 0.5) * TILE
+    if (!cliff[up] && (relief[up] & 7) === (relief[i] & 7) && !cliff[down] && (relief[down] & 7) < (relief[i] & 7) && world.walkable(x, y - TILE) && world.walkable(x, y + TILE)) spot = { x, y }
+  }
+  assert.ok(spot)
+  Object.assign(p, { x: spot.x, y: spot.y - TILE })
+  // À pied, la falaise ne se traverse pas.
+  p.moved = world.time - 1
+  assert.ok(!world.move(p.id, spot.x, spot.y, 0, 1))
+  // En sautant, si : on atterrit en bas.
+  assert.ok(world.jump(p.id, spot.x, spot.y + TILE))
+  assert.deepEqual([p.x, p.y], [spot.x, spot.y + TILE])
+  // Pas en remontant ; pas trop loin ; pas sur une falaise.
+  assert.ok(!world.jump(p.id, spot.x, spot.y - TILE))
+  Object.assign(p, { x: spot.x, y: spot.y - TILE })
+  assert.ok(!world.jump(p.id, spot.x, spot.y + TILE * 5))
+  assert.ok(!world.jump(p.id, spot.x, spot.y))
+})
+
+test('jeter par terre : toute la pile tombe devant soi, n’importe qui la ramasse', () => {
+  const world = bare()
+  const p = world.join('Dio')
+  const q = world.join('Kuro')
+  Object.assign(p.inv, { wood: 7, axe: 1 })
+  world.hold(p.id, 'axe')
+  assert.ok(!world.discard(p.id, 'stone'))
+  assert.ok(world.discard(p.id, 'wood'))
+  assert.equal(p.inv.wood, undefined)
+  const item = [...world.items.values()].find((i) => i.kind === 'wood')
+  assert.equal(item.n, 7)
+  assert.ok(Math.hypot(item.x - p.x, item.y - p.y) > 20)
+  // L'outil en main aussi : il n'est plus en main.
+  assert.ok(world.discard(p.id, 'axe'))
+  assert.equal(p.held, null)
+  Object.assign(q, { x: item.x, y: item.y + 4 })
+  assert.ok(world.pick(q.id, item.id))
+  assert.equal(q.inv.wood, 7)
+})
+
+test('le sac plein : la tombe garde ce qui ne tient pas ; on ne ramasse pas une sorte de plus', () => {
+  const world = bare()
+  const p = world.join('Dio')
+  const kinds = ['wood', 'stone', 'flint', 'resin', 'meat', 'leather', 'hide', 'antler', 'mushroom', 'raspberry', 'blueberries', 'carrot', 'copperore', 'tinore', 'copper', 'tin', 'bronze', 'finewood', 'corewood', 'bonefragments', 'greydwarfeye', 'trollhide', 'arrow', 'flintarrow', 'cooked', 'jam', 'carrotsoup', 'bronzenails', 'surtlingcore', 'trophy', 'hardantler', 'beechseeds', 'birchseeds', 'firecone', 'pinecone', 'torch', 'club', 'knife', 'spear', 'axe']
+  assert.equal(kinds.length, 40)
+  for (const k of kinds) p.inv[k] = 1
+  // Une tombe : du bois (on en a déjà), une hache en bronze et des clous (non).
+  const tomb = { id: world.nextId++, x: p.x + 10, y: p.y, name: 'Dio', inv: { wood: 5, bronzeaxe: 1 }, quality: {}, worn: {}, held: null }
+  world.tombs.set(tomb.id, tomb)
+  assert.equal(world.loot(p.id, tomb.id), 'full')
+  assert.equal(p.inv.wood, 6)
+  assert.ok(world.tombs.has(tomb.id))
+  assert.deepEqual(tomb.inv, { bronzeaxe: 1 })
+  // Une case se libère : on reprend le reste, la tombe s'en va.
+  delete p.inv.knife
+  assert.equal(world.loot(p.id, tomb.id), null)
+  assert.equal(p.inv.bronzeaxe, 1)
+  assert.ok(!world.tombs.has(tomb.id))
+  // Plein encore : une sorte de plus ne se ramasse pas, une qu'on a, si.
+  const nails = world.drop('stone', 2, p.x + 5, p.y)
+  const shield = world.drop('woodshield', 1, p.x + 5, p.y)
+  assert.ok(!world.pick(p.id, shield.id))
+  assert.ok(world.pick(p.id, nails.id))
+})
+
+test('le sac : des piles (au-delà, une case de plus), un poids ; trop chargé, on ne bouge plus', () => {
+  const { CARRY, stackOf } = require('../src/ronnheim/world')
+  const world = bare()
+  const p = world.join('Dio')
+  assert.equal(stackOf('wood'), 50)
+  assert.equal(stackOf('axe'), 1)
+  p.inv.wood = 120
+  assert.equal(world.bag(p), 3)
+  // 38 cases de plus : il reste 30 bois de place dans la 3e pile, et une case.
+  for (let k = 0; k < 38; k++) p.inv['x' + k] = 1
+  assert.equal(world.bag(p), 41)
+  for (let k = 0; k < 38; k++) delete p.inv['x' + k]
+  for (let k = 0; k < 36; k++) p.inv['x' + k] = 1
+  assert.equal(world.fit(p, 'wood', 100), 30 + 50)
+  assert.equal(world.fit(p, 'stone', 100), 50)
+  // Ramasser : ce qui tient ; le reste reste par terre.
+  const pile = world.drop('wood', 100, p.x + 5, p.y)
+  assert.ok(world.pick(p.id, pile.id))
+  assert.equal(p.inv.wood, 200)
+  assert.equal(pile.n, 20)
+  assert.ok(world.items.has(pile.id))
+  // Le poids : au bout, on ne bouge plus.
+  for (const k of Object.keys(p.inv)) delete p.inv[k]
+  p.inv.copperore = CARRY / 10
+  assert.ok(world.load(p) >= CARRY)
+  p.moved = world.time - 1
+  assert.ok(!world.move(p.id, p.x + 10, p.y, 3, 1))
+  p.inv.copperore -= 1
+  assert.ok(world.move(p.id, p.x + 10, p.y, 3, 1))
 })
