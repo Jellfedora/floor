@@ -7,7 +7,8 @@ const games = [
   require('./puissance-4'),
   require('./ronnie-io'),
   require('./demineur'),
-  require('./ronnie-run')
+  require('./ronnie-run'),
+  require('./riff-hero')
 ]
 
 module.exports = Object.fromEntries(games.map((g) => [g.id, g]))
