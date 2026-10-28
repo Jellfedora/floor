@@ -113,3 +113,28 @@ test('au démineur, le plus petit temps gagne', async () => {
   assert.equal(board.entries[0].details.clicks, 98)
   assert.equal((await call('GET', '/v1/games')).body.find((g) => g.id === 'demineur').order, 'asc')
 })
+
+test('à Ronnie Run, la plus longue course gagne', async () => {
+  const a = (await call('POST', '/v1/players', { body: { name: 'Rainbow' } })).body
+  const b = (await call('POST', '/v1/players', { body: { name: 'Elf' } })).body
+  assert.equal((await call('POST', '/v1/games/ronnie-run/scores', { token: a.token, body: { meters: 420, jumps: 37 } })).status, 201)
+  assert.equal((await call('POST', '/v1/games/ronnie-run/scores', { token: a.token, body: { meters: 300, jumps: 25 } })).body.record, false)
+  await call('POST', '/v1/games/ronnie-run/scores', { token: b.token, body: { meters: 666, jumps: 61 } })
+  assert.equal((await call('POST', '/v1/games/ronnie-run/scores', { token: b.token, body: { meters: 999999, jumps: 1 } })).status, 400)
+
+  const board = (await call('GET', '/v1/games/ronnie-run/leaderboard', { token: a.token })).body
+  assert.deepEqual(board.entries.map((e) => [e.rank, e.name, e.score, e.me]), [[1, 'Elf', 666, false], [2, 'Rainbow', 420, true]])
+  assert.equal(board.entries[0].details.jumps, 61)
+})
+
+test('à Backstage, le plus haut score gagne', async () => {
+  const a = (await call('POST', '/v1/players', { body: { name: 'Halford' } })).body
+  const b = (await call('POST', '/v1/players', { body: { name: 'Dickinson' } })).body
+  assert.equal((await call('POST', '/v1/games/backstage/scores', { token: a.token, body: { score: 350, rage: 1, picks: 15 } })).status, 201)
+  await call('POST', '/v1/games/backstage/scores', { token: b.token, body: { score: 1260, rage: 3, picks: 36 } })
+  assert.equal((await call('POST', '/v1/games/backstage/scores', { token: b.token, body: { score: 0, rage: 0, picks: 0 } })).status, 400)
+
+  const board = (await call('GET', '/v1/games/backstage/leaderboard', { token: a.token })).body
+  assert.deepEqual(board.entries.map((e) => [e.rank, e.name, e.score, e.me]), [[1, 'Dickinson', 1260, false], [2, 'Halford', 350, true]])
+  assert.equal(board.entries[0].details.rage, 3)
+})
