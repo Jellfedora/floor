@@ -126,3 +126,15 @@ test('à Ronnie Run, la plus longue course gagne', async () => {
   assert.deepEqual(board.entries.map((e) => [e.rank, e.name, e.score, e.me]), [[1, 'Elf', 666, false], [2, 'Rainbow', 420, true]])
   assert.equal(board.entries[0].details.jumps, 61)
 })
+
+test('à Backstage, le plus haut score gagne', async () => {
+  const a = (await call('POST', '/v1/players', { body: { name: 'Halford' } })).body
+  const b = (await call('POST', '/v1/players', { body: { name: 'Dickinson' } })).body
+  assert.equal((await call('POST', '/v1/games/backstage/scores', { token: a.token, body: { score: 350, rage: 1, picks: 15 } })).status, 201)
+  await call('POST', '/v1/games/backstage/scores', { token: b.token, body: { score: 1260, rage: 3, picks: 36 } })
+  assert.equal((await call('POST', '/v1/games/backstage/scores', { token: b.token, body: { score: 0, rage: 0, picks: 0 } })).status, 400)
+
+  const board = (await call('GET', '/v1/games/backstage/leaderboard', { token: a.token })).body
+  assert.deepEqual(board.entries.map((e) => [e.rank, e.name, e.score, e.me]), [[1, 'Dickinson', 1260, false], [2, 'Halford', 350, true]])
+  assert.equal(board.entries[0].details.rage, 3)
+})
