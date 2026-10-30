@@ -60,7 +60,9 @@ const migrations = [
    CREATE TABLE ronnheim_world (
      k TEXT PRIMARY KEY,
      v TEXT NOT NULL
-   );`
+   );`,
+  // Ronnie.io, Speed Metal et Ronnie Run ont changé : leurs classements repartent de zéro (une fois).
+  "DELETE FROM scores WHERE game IN ('ronnie-io', 'speed-metal', 'ronnie-run');"
 ]
 
 // Ouvre (ou crée) la base : `file` vaut ':memory:' pour les tests.

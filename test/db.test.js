@@ -26,3 +26,18 @@ test('les doublons d’avant les pseudos uniques sont numérotés, le plus ancie
   assert.deepEqual(names, ['Dio', 'DIO 2', 'dio 3', null, null])
   assert.throws(() => db.prepare("UPDATE players SET name_key = 'dio' WHERE id = 'b'").run())
 })
+
+test('les classements de Ronnie.io, Speed Metal et Ronnie Run repartent de zéro, pas les autres', () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'floor-')), 'floor.db')
+  let db = open(file)
+  db.prepare("INSERT INTO players (id, token_hash, name, name_key, created_at) VALUES ('a', 'ha', 'Dio', 'dio', 1)").run()
+  const add = db.prepare("INSERT INTO scores VALUES (?, 'a', 10, '{}', 1)")
+  for (const game of ['ronnie-io', 'speed-metal', 'ronnie-run', 'demineur', 'riff-hero-facile']) add.run(game)
+  db.prepare('PRAGMA user_version = 5').run()
+  db.close()
+
+  db = open(file)
+  const games = db.prepare('SELECT game FROM scores ORDER BY game').all().map((s) => s.game)
+  assert.deepEqual(games, ['demineur', 'riff-hero-facile'])
+  db.close()
+})
